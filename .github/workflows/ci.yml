@@ -1,0 +1,15 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install shells
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox dash shellcheck
+      - name: ShellCheck
+        run: shellcheck kvn install.sh && shellcheck -s sh tests/run.sh
+      - name: Tests (busybox sh — как на роутере)
+        run: TEST_SH="busybox sh" sh tests/run.sh
+      - name: Tests (dash)
+        run: TEST_SH=dash sh tests/run.sh
