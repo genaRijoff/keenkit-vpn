@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=dash  # целевой shell — BusyBox ash (Keenetic/Entware)
-# athena-patch — KeenKit: п.8 «KeenBOOT OTA Update» ставит загрузчик Athena (Project Athens)
-# на роутерах MT7981 (aarch64). Прочие архитектуры и п.5 работают как в оригинале.
+# athena-patch — KeenKit: пункт «9. Athena OTA Update» ставит загрузчик Athena (Project Athens)
+# на роутерах MT7981 (aarch64). Пункты 5 и 8 работают как в оригинале.
 #
 # Использование:
 #   athena-patch.sh            применить (то же, что apply)
@@ -11,8 +11,8 @@
 #   athena-patch.sh diff       показать изменения, ничего не меняя
 #
 # Что меняется в KeenKit:
-#   - п.8 на aarch64: каталог /files/athena вместо /files/keenboot/aarch64
-#   - вход в единственную вложенную папку модели (Cudy_TR3000/r41/)
+#   - п.9 (только aarch64): модель -> версия Athena (r41, ...) -> файл; запись тем же
+#     keenboot_writer, что и п.8; единственная версия выбирается автоматически
 #   - защита: папка не совпадает с моделью роутера -> нужно ввести YES
 #     (CMCC RAX3000Me = папка CMCC_RAX3000M, как в wiki Athena)
 #   - шапка: «Загрузчик: Athena r41 (2.14.0)»
@@ -23,7 +23,7 @@
 
 set -u
 
-PATCH_VERSION="0.0.3"
+PATCH_VERSION="0.0.4"
 TESTED_KEENKIT="2.9.5"
 
 # ATHENA_ROOT — только для тестов, на роутере пусто.
@@ -98,12 +98,29 @@ ATHENA_PATCH="$PATCH_VERSION"
 EOF
 
   cat >"$TMP_DIR/s_path" <<'EOF'
-    [ "$arch" != "aarch64" ] || ota_path="/files/athena" # athena-patch
+  elif [ "$ota_mode" = "athena" ]; then # athena-patch: п.9
+    arch=$(get_architecture)
+    if [ "$arch" != "aarch64" ]; then
+      print_message "Athena доступна только для MT7981 (aarch64)" "$RED"
+      exit_function
+      return 1
+    fi
+    packages_checker "xz"
+    ota_path="/files/athena"
+    ota_mode="keenboot"
+EOF
+
+  cat >"$TMP_DIR/s_menu" <<'EOF'
+    [ "$arch" != "aarch64" ] || echo "9. Athena OTA Update" # athena-patch
+EOF
+
+  cat >"$TMP_DIR/s_case" <<'EOF'
+    9) ota_update "athena" ;; # athena-patch
 EOF
 
   cat >"$TMP_DIR/s_guard" <<'EOF'
   # athena-patch: защита от записи загрузчика другой модели
-  if [ "$ota_mode" = "keenboot" ] && [ "$ota_path" = "/files/athena" ]; then
+  if [ "$ota_path" = "/files/athena" ]; then
     athena_dir=$(echo "$DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[_-]/ /g')
     athena_dev=$(echo "$current_device_model" | tr '[:upper:]' '[:lower:]' | sed 's/[_-]/ /g')
     case "$athena_dev" in
@@ -129,12 +146,36 @@ EOF
 EOF
 
   cat >"$TMP_DIR/s_subdir" <<'EOF'
-  # athena-patch: единственная вложенная папка (Модель/r41/)
-  if [ -z "$BIN_FILES" ]; then
-    athena_sub=$(echo "$REQUEST" | grep -o 'href="[^"]*"' | cut -d'"' -f2 | grep -E '^[^/?#]+/$' | grep -vE '^\.\.?/$' | sed 's|/$||')
-    if [ -n "$athena_sub" ] && [ "$(echo "$athena_sub" | wc -l)" -eq 1 ]; then
-      DIR_ENCODED="$DIR_ENCODED/$athena_sub"
-      DIR="$DIR/$(echo "$athena_sub" | sed 's|%20| |g')"
+  # athena-patch: выбор версии Athena (Модель/r41/); одна версия выбирается автоматически
+  if [ -z "$BIN_FILES" ] && [ "$ota_path" = "/files/athena" ]; then
+    athena_vers=$(echo "$REQUEST" | grep -o 'href="[^"]*"' | cut -d'"' -f2 | grep -E '^[^/?#]+/$' | grep -vE '^\.\.?/$' | sed 's|/$||')
+    athena_count=$(printf '%s\n' "$athena_vers" | grep -c .)
+    athena_ver=""
+    if [ "$athena_count" -eq 1 ]; then
+      athena_ver="$athena_vers"
+    elif [ "$athena_count" -gt 1 ]; then
+      printf "\nВерсии Athena для %s:\n" "$DIR"
+      printf '%s\n' "$athena_vers" | sed 's|%20| |g' | awk '{ printf "%d. %s\n", NR, $0 }'
+      exit_main_menu
+      while true; do
+        if ! read -r -p "Выберите версию Athena (от 1 до $athena_count): " athena_num; then
+          echo ""
+          exit 0
+        fi
+        if [ "$athena_num" = "00" ]; then
+          main_menu
+          return
+        fi
+        if echo "$athena_num" | grep -qE '^[0-9]+$' && [ "$athena_num" -ge 1 ] && [ "$athena_num" -le "$athena_count" ]; then
+          break
+        fi
+        print_message "Неверный выбор. Выберите от 1 до $athena_count." "$RED"
+      done
+      athena_ver=$(printf '%s\n' "$athena_vers" | sed -n "${athena_num}p")
+    fi
+    if [ -n "$athena_ver" ]; then
+      DIR_ENCODED="$DIR_ENCODED/$athena_ver"
+      DIR="$DIR/$(echo "$athena_ver" | sed 's|%20| |g')"
       REQUEST=$(ota_request "$osvault/$DIR_ENCODED/") || { exit_function; return 1; }
       BIN_FILES=$(echo "$REQUEST" | grep -o 'href="[^"]*"' | cut -d'"' -f2 | grep '\.bin$' | sed 's|%20| |g')
     fi
@@ -159,7 +200,10 @@ build_patched() {
   A3="  DIR_ENCODED=\$(echo \"\$DIR\" | sed 's/ /%20/g')" \
   A4="  BIN_FILES=\$(echo \"\$REQUEST\" | grep -o 'href=\"[^\"]*\"' | cut -d'\"' -f2 | grep '\\.bin\$' | sed 's|%20| |g')" \
   A5='    local strings="$1" pattern found' \
+  A6='    echo "8. KeenBOOT OTA Update"' \
+  A7='    8) ota_update "keenboot" ;;' \
   S1="$TMP_DIR/s_marker" S2="$TMP_DIR/s_path" S3="$TMP_DIR/s_guard" S4="$TMP_DIR/s_subdir" S5="$TMP_DIR/s_parse" \
+  S6="$TMP_DIR/s_menu" S7="$TMP_DIR/s_case" \
     awk '
       function emit(f,   line) {
         while ((getline line < f) > 0) print line
@@ -167,13 +211,13 @@ build_patched() {
       }
       {
         print
-        for (i = 1; i <= 5; i++) {
+        for (i = 1; i <= 7; i++) {
           if ($0 == ENVIRON["A" i]) { hits[i]++; emit(ENVIRON["S" i]) }
         }
       }
       END {
         bad = 0
-        for (i = 1; i <= 5; i++) {
+        for (i = 1; i <= 7; i++) {
           if (hits[i] != 1) { printf "якорь %d найден %d раз(а)\n", i, hits[i] + 0 > "/dev/stderr"; bad = 1 }
         }
         exit bad
@@ -184,7 +228,8 @@ build_patched() {
 verify_patched() {
   f="$1"
   [ "$(patch_version "$f")" = "$PATCH_VERSION" ] || return 1
-  [ "$(grep -c '# athena-patch' "$f")" -eq 4 ] || return 1
+  [ "$(grep -c '# athena-patch' "$f")" -eq 6 ] || return 1
+  grep -q '^    9) ota_update "athena" ;; # athena-patch$' "$f" || return 1
   # shellcheck disable=SC2016  # литерал $arch из KeenKit
   grep -q '^    ota_path="/files/keenboot/\$arch"$' "$f" || return 1
   sh -n "$f"
@@ -268,7 +313,8 @@ cmd_apply() {
   ok "Патч $PATCH_VERSION применён к KeenKit $VER"
   warn "Неофициальный патч: с проблемами не обращайтесь к авторам KeenKit и Athena"
   echo "  п.5 прошивки:  $FW_DOMAIN/osvault"
-  echo "  п.8 KeenBOOT:  $FW_DOMAIN/files/athena (aarch64), остальные — как в KeenKit"
+  echo "  п.8 KeenBOOT:  как в KeenKit"
+  echo "  п.9 Athena:    $FW_DOMAIN/files/athena (только aarch64)"
   echo "  копия:         $BACKUP"
   echo "  откат:         sh $0 revert"
 }

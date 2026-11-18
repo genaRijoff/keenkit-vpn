@@ -7,7 +7,8 @@
 | Пункт KeenKit | Источник |
 |---|---|
 | 5. OTA Update (прошивки) | `https://osvault.project-athens.com` (Афина) |
-| 8. KeenBOOT OTA Update | `https://spatiumstas.github.io/KeenKit` (Стас); с [athena-patch](#athena-patch) на aarch64 — `https://osvault.project-athens.com/files/athena` (Афина) |
+| 8. KeenBOOT OTA Update | `https://spatiumstas.github.io/KeenKit` (Стас) |
+| 9. Athena OTA Update | `https://osvault.project-athens.com/files/athena` (Афина) — с [athena-patch](#athena-patch), только aarch64 |
 
 KeenKit не модифицируется: kvn кладёт перед ним в `PATH` обёртку `curl`, которая
 - добавляет `--interface <VPN>` ко всем внешним запросам;
@@ -42,11 +43,11 @@ kvn uninstall    удаление (с подтверждением)
 Пример `kvn check`:
 
 ```
-kvn 0.0.5
+kvn 0.0.6
 Прошивки (Афина): https://osvault.project-athens.com
-KeenBOOT (Афина): https://osvault.project-athens.com/files/athena
+KeenBOOT (Стас): https://spatiumstas.github.io/KeenKit
 KeenKit: 2.9.5 OK
-Athena-патч: 0.0.3 (п.8 -> Athena)
+Athena-патч: 0.0.4 (п.9 -> Athena, https://osvault.project-athens.com/files/athena)
 KeenKit.conf: OK
 
 напрямую (x.x.x.x): KeenBOOT OK, прошивки OK
@@ -80,14 +81,14 @@ kvn опирается на внутренности KeenKit: `ota_path="/files/
 
 ## athena-patch
 
-Патч KeenKit: п.8 «KeenBOOT OTA Update» ставит загрузчик [Athena](https://project-athens.com/ru/wiki/helpful/athena) (Project Athens) на роутерах MT7981 (aarch64). Проверено на Cudy TR3000: Athena r41 записана через `keenboot_writer` с побайтной проверкой, роутер загружается.
+Патч KeenKit: пункт «9. Athena OTA Update» ставит загрузчик [Athena](https://project-athens.com/ru/wiki/helpful/athena) (Project Athens) на роутерах MT7981 (aarch64). Пункты 5 и 8 остаются как в оригинале. Проверено на Cudy TR3000 и CMCC RAX3000Me: Athena r41 записана через `keenboot_writer` с побайтной проверкой, роутеры загружаются.
 
 Что меняется (только в `/opt/keenkit.sh`, оригинал сохраняется):
 
 | | |
 |---|---|
-| п.8 на aarch64 | каталог `/files/athena` вместо `/files/keenboot/aarch64`; mipsel и п.5 — без изменений |
-| Вложенная папка | единственная подпапка модели открывается автоматически (`Cudy_TR3000/r41/`); при нескольких — нет |
+| п.9 (aarch64) | модель → версия Athena (`r41`, …) → файл; одна версия выбирается автоматически; запись тем же `keenboot_writer`, что и п.8 |
+| п.5, п.8 | без изменений (тесты сравнивают запросы и вывод с оригиналом) |
 | Защита модели | папка не совпадает с моделью роутера → запись только после ввода `YES` (RAX3000Me ↔ `CMCC_RAX3000M` считается совпадением — один файл по wiki Athena) |
 | Шапка | `Загрузчик: Athena r41 (2.14.0)` вместо `U-Boot phase` |
 
@@ -119,6 +120,6 @@ KEENKIT_SRC=/путь/keenkit.sh busybox sh tests/athena.sh
 # миграция с патча v1 проверяется, если указать путь к нему: V1_PATCH=/путь/patch-athena.sh
 ```
 
-`tests/athena.sh` работает на настоящем KeenKit (в CI скачивается по закреплённому коммиту с проверкой SHA-256): установка, откат, миграция с v1, а также функциональные прогоны пропатченного `ota_update` с заглушками сети — п.8 aarch64/mipsel, п.5, защита модели, вложенные папки, сравнение с оригиналом.
+`tests/athena.sh` работает на настоящем KeenKit (в CI скачивается по закреплённому коммиту с проверкой SHA-256): установка, откат, миграция с v1, а также функциональные прогоны пропатченного `ota_update` с заглушками сети — п.9 (выбор версии, защита модели, mipsel), п.5 и п.8 в сравнении с оригиналом.
 
 Тесты работают в изолированном корне (`KVN_ROOT`) с поддельными `curl`, `/sys/class/net` и KeenKit. CI — `.github/workflows/ci.yml`.

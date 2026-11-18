@@ -132,22 +132,40 @@ has "check: строка канала" "$out" "nwg0 (203.0.113.9): KeenBOOT"
 hasnt "check: eth0 не в IFACES" "$out" "eth0 ("
 teardown
 
-echo "== athena-patch"
+echo "== athena-patch 0.0.4+: отдельный п.9"
 setup
-sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.3"|' "$T/opt/keenkit.sh"
+sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.4"\n    9) ota_update "athena" ;; # athena-patch|' "$T/opt/keenkit.sh"
+export KVN_ARCH=aarch64
+out=$(run)
+has "п.9: шапка KeenBOOT Стас + Athena п.9" "$out" "KeenBOOT: Стас  Athena: п.9  Интерфейс: nwg0"
+has "п.9: канал проверяется по Pages (KeenBOOT)" "$(cat "$T/curl.log")" "--interface nwg0 -o /dev/null https://spatiumstas.github.io/KeenKit/"
+out=$(run check)
+has "check: п.9" "$out" "Athena-патч: 0.0.4 (п.9 -> Athena, https://osvault.project-athens.com/files/athena)"
+has "check: KeenBOOT Стас" "$out" "KeenBOOT (Стас): https://spatiumstas.github.io/KeenKit"
+export KVN_ARCH=mipsel
+out=$(run)
+hasnt "mipsel: без Athena в шапке" "$out" "Athena: п.9"
+out=$(run check)
+has "mipsel: Athena недоступна" "$out" "mipsel: Athena недоступна"
+unset KVN_ARCH
+teardown
+
+echo "== athena-patch 0.0.2–0.0.3: Athena в п.8"
+setup
+sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.3"\n    [ "$arch" != "aarch64" ] \|\| ota_path="/files/athena" # athena-patch|' "$T/opt/keenkit.sh"
 export KVN_ARCH=aarch64
 out=$(run)
 has "aarch64 + патч: шапка KeenBOOT Афина" "$out" "KeenBOOT: Афина"
 has "aarch64 + патч: проверка канала по /files/athena" "$(cat "$T/curl.log")" "--interface nwg0 -o /dev/null https://osvault.project-athens.com/files/athena/"
 hasnt "aarch64 + патч: Pages не проверяется" "$(grep -- '-o /dev/null' "$T/curl.log")" "spatiumstas.github.io"
 out=$(run check)
-has "check: строка патча" "$out" "Athena-патч: 0.0.3 (п.8 -> Athena)"
+has "check: строка патча" "$out" "Athena-патч: 0.0.3 (п.8 -> Athena; обнови: athena-patch)"
 has "check: источник KeenBOOT" "$out" "KeenBOOT (Афина): https://osvault.project-athens.com/files/athena"
 export KVN_ARCH=mipsel
 out=$(run)
 has "mipsel + патч: KeenBOOT Стас" "$out" "KeenBOOT: Стас"
 out=$(run check)
-has "mipsel + патч: п.8 без изменений" "$out" "mipsel: п.8 без изменений"
+has "mipsel + патч: Athena недоступна" "$out" "mipsel: Athena недоступна"
 unset KVN_ARCH
 teardown
 setup
@@ -168,7 +186,7 @@ teardown
 
 echo "== прочее"
 setup
-eq "--version" "$(run -V)" "0.0.5"
+eq "--version" "$(run -V)" "0.0.6"
 out=$(run --bad); rc=$?
 eq "неизвестный параметр -> rc=1" "$rc" 1
 out=$(echo n | run uninstall)

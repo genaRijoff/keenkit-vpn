@@ -2,7 +2,8 @@
 # shellcheck shell=dash  # целевой shell — BusyBox ash (как dash: POSIX + local)
 # kvn (KeenVPN) — запуск KeenKit через VPN-интерфейс с раздельными OTA-источниками:
 #   п.5 OTA Update (прошивки) -> FW_DOMAIN (Афина)
-#   п.8 KeenBOOT OTA Update    -> KB_BASE   (Стас); с athena-patch на aarch64 — Athena
+#   п.8 KeenBOOT OTA Update    -> KB_BASE   (Стас)
+#   п.9 Athena OTA Update      -> FW_DOMAIN/files/athena (с athena-patch 0.0.4+, aarch64)
 # KeenKit не модифицируется: подменяется только curl через PATH (переживает обновления KeenKit).
 #
 # Использование:
@@ -12,7 +13,7 @@
 #   kvn uninstall    удалить kvn
 # Настройки: /opt/etc/kvn.conf (создаётся при первом запуске)
 
-VERSION="0.0.5"
+VERSION="0.0.6"
 KK_TESTED="2.9.1 2.9.2 2.9.3 2.9.4 2.9.5"
 
 set -u
@@ -130,8 +131,17 @@ athena_patch_version() {
   sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/p' "$KK_SCRIPT" 2>/dev/null | head -n 1
 }
 
+# athena-patch 0.0.4+ добавляет отдельный п.9; 0.0.2–0.0.3 переводили на Athena сам п.8
+athena_menu9() {
+  grep -q '^    9) ota_update "athena" ;;' "$KK_SCRIPT" 2>/dev/null
+}
+
+athena_in_menu8() {
+  grep -qF '] || ota_path="/files/athena" # athena-patch' "$KK_SCRIPT" 2>/dev/null
+}
+
 resolve_kb_source() {
-  if [ -n "$(athena_patch_version)" ] && [ "$ARCH" = "aarch64" ]; then
+  if athena_in_menu8 && [ "$ARCH" = "aarch64" ]; then
     KB_URL="$FW_DOMAIN/files/athena"
     KB_NAME="$FW_LABEL"
   else
@@ -261,10 +271,13 @@ cmd_run() {
   iface=$(pick_iface) || die "Нет рабочего интерфейса ($IFACES). Проверка: kvn check"
   install_wrapper
   set_kk_domain
-  printf '%bПрошивки:%b %b%s%b  %bKeenBOOT:%b %b%s%b  %bИнтерфейс:%b %b%s%b\n' \
+  printf '%bПрошивки:%b %b%s%b  %bKeenBOOT:%b %b%s%b' \
     "$CYAN" "$NC" "$GREEN" "$FW_LABEL" "$NC" \
-    "$CYAN" "$NC" "$GREEN" "$KB_NAME" "$NC" \
-    "$CYAN" "$NC" "$GREEN" "$iface" "$NC"
+    "$CYAN" "$NC" "$GREEN" "$KB_NAME" "$NC"
+  if athena_menu9 && [ "$ARCH" = "aarch64" ]; then
+    printf '  %bAthena:%b %bп.9%b' "$CYAN" "$NC" "$GREEN" "$NC"
+  fi
+  printf '  %bИнтерфейс:%b %b%s%b\n' "$CYAN" "$NC" "$GREEN" "$iface" "$NC"
   KK_IFACE="$iface" KK_FW="$FW_DOMAIN" KK_KB="$KB_BASE" KK_REAL="$REAL_CURL" \
     PATH="${WRAP%/*}:$PATH" exec sh "$KK_SCRIPT"
 }
@@ -316,10 +329,12 @@ cmd_check() {
 
   a=$(athena_patch_version)
   if [ -n "$a" ]; then
-    if [ "$ARCH" = "aarch64" ]; then
-      printf 'Athena-патч: %s (п.8 -> Athena)\n' "$a"
+    if [ "$ARCH" != "aarch64" ]; then
+      printf 'Athena-патч: %s (%s: Athena недоступна)\n' "$a" "$ARCH"
+    elif athena_menu9; then
+      printf 'Athena-патч: %s (п.9 -> Athena, %s)\n' "$a" "$FW_DOMAIN/files/athena"
     else
-      printf 'Athena-патч: %s (%s: п.8 без изменений)\n' "$a" "$ARCH"
+      printf 'Athena-патч: %s (п.8 -> Athena; обнови: athena-patch)\n' "$a"
     fi
   fi
 

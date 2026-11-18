@@ -41,8 +41,8 @@ out=$(run status)
 has "status до патча" "$out" "не применён"
 out=$(run); rc=$?
 eq "apply: rc=0" "$rc" 0
-has "apply: сообщение" "$out" "Патч 0.0.3 применён к KeenKit $VER"
-eq "метка версии патча" "$(sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/p' "$(T)")" "0.0.3"
+has "apply: сообщение" "$out" "Патч 0.0.4 применён к KeenKit $VER"
+eq "метка версии патча" "$(sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/p' "$(T)")" "0.0.4"
 same "копия оригинала" "$R/opt/keenkit.sh.$VER.orig" "$SRC"
 [ -L "$R/opt/bin/keenkit" ] && ok "симлинк сохранён" || bad "симлинк сохранён"
 $SH -n "$(T)" && ok "синтаксис пропатченного KeenKit" || bad "синтаксис пропатченного KeenKit"
@@ -55,10 +55,10 @@ out=$(run apply)
 has "повтор: уже применён" "$out" "уже применён"
 eq "повтор: файл не тронут" "$(md5sum <"$(T)")" "$m1"
 out=$(run diff)
-has "diff на пропатченном" "$out" '+ATHENA_PATCH="0.0.3"'
+has "diff на пропатченном" "$out" '+ATHENA_PATCH="0.0.4"'
 eq "diff: файл не тронут" "$(md5sum <"$(T)")" "$m1"
 out=$(run status)
-has "status после патча" "$out" "0.0.3"
+has "status после патча" "$out" "0.0.4"
 out=$(run revert); rc=$?
 eq "revert: rc=0" "$rc" 0
 same "revert: оригинал восстановлен" "$(T)" "$SRC"
@@ -140,6 +140,8 @@ extract() { # extract <файл> <функция...>
 W=$(mktemp -d)
 export W
 extract "$REF/opt/keenkit.sh" ota_update parse_bootloader_version print_list_with_highlight >"$W/patched_funcs.sh"
+PATCHED_KK="$W/patched_keenkit.sh"
+cp "$REF/opt/keenkit.sh" "$PATCHED_KK"
 extract "$SRC" ota_update parse_bootloader_version print_list_with_highlight >"$W/orig_funcs.sh"
 rm -rf "$REF"
 
@@ -195,8 +197,11 @@ ota_request() {
   "$D/files/athena/Xiaomi_AX3000T/") dir r41/ ;;
   "$D/files/athena/Xiaomi_AX3000T/r41/") dir Athena_Xiaomi_AX3000T_r41.bin md5sum ;;
   "$D/files/athena/Multi_TR3000/") dir r40/ r41/ ;;
+  "$D/files/athena/Multi_TR3000/r40/") dir Athena_Multi_TR3000_r40.bin md5sum ;;
+  "$D/files/athena/Multi_TR3000/r41/") dir Athena_Multi_TR3000_r41.bin md5sum ;;
   "$D/files/keenboot/mipsel") dir Netis_N6/ ;;
   "$D/files/keenboot/aarch64") dir KB-41/ ;;
+  "$D/files/keenboot/aarch64/KB-41/") dir KeenBOOT_TR3000_KB-41.bin md5sum ;;
   "$D/files/keenboot/mipsel/Netis_N6/") dir KeenBOOT_N6_KB-41.bin md5sum ;;
   "$D/osvault") dir Cudy%20TR3000/ ;;
   "$D/osvault/Cudy%20TR3000/") dir Cudy_TR3000_5.2_Beta_3_single.bin md5sum ;;
@@ -215,57 +220,79 @@ flow() { # flow <funcs> <mode> <arch> <device> <ввод>
 P="$W/patched_funcs.sh"
 O="$W/orig_funcs.sh"
 
-echo "== п.8 aarch64: Athena"
-out=$(flow "$P" keenboot aarch64 TR3000 '1\n1\nn\n')
+echo "== п.9 Athena (aarch64)"
+out=$(flow "$P" athena aarch64 TR3000 '1\n1\nn\n')
 log=$(cat "$W/log")
 has "каталог /files/athena" "$log" "https://osv/files/athena "
-has "вход в r41" "$log" "https://osv/files/athena/Cudy_TR3000/r41/ "
+has "одна версия -> r41 автоматически" "$log" "https://osv/files/athena/Cudy_TR3000/r41/ "
 has "размер файла из r41" "$log" "https://osv/files/athena/Cudy_TR3000/r41/Athena_Cudy_TR3000_r41.bin -I"
 has "md5sum из r41" "$log" "https://osv/files/athena/Cudy_TR3000/r41/md5sum --output"
 has "заголовок версий с подпапкой" "$out" "Версии для Cudy_TR3000/r41"
+hasnt "одна версия: без меню выбора версии" "$out" "Версии Athena для"
 has "MD5 совпал" "$out" "MD5 хеш совпадает"
+has "предупреждение KeenKit о загрузчике" "$out" "Обновление загрузчика опасная процедура"
 hasnt "без YES-запроса для своей модели" "$out" "не совпадает с моделью"
 hasnt "n — запись не выполнена" "$out" "WRITE_AARCH64"
-
-out=$(flow "$P" keenboot aarch64 TR3000 '1\n1\ny\n')
+out=$(flow "$P" athena aarch64 TR3000 '1\n1\ny\n')
 has "y — запись Athena через keenboot_writer" "$out" "WRITE_AARCH64 $W/storage/Athena_Cudy_TR3000_r41.bin"
 has "y — сообщение об успехе" "$out" "Загрузчик успешно обновлён"
+out=$(flow "$P" athena mipsel TR3000 '1\n')
+has "mipsel: п.9 недоступен" "$out" "Athena доступна только для MT7981 (aarch64)"
+eq "mipsel: сеть не трогается" "$(cat "$W/log")" ""
 
-echo "== защита модели"
-out=$(flow "$P" keenboot aarch64 TR3000 '2\nno\n')
+echo "== выбор версии Athena"
+out=$(flow "$P" athena aarch64 TR3000 '3\n2\n1\nn\n')
+has "несколько версий: меню" "$out" "Версии Athena для Multi_TR3000"
+has "несколько версий: список" "$out" "2. r41"
+has "выбрана r41" "$(cat "$W/log")" "https://osv/files/athena/Multi_TR3000/r41/ "
+hasnt "r40 не открыта" "$(cat "$W/log")" "Multi_TR3000/r40/ "
+out=$(flow "$P" athena aarch64 TR3000 '3\n9\nx\n1\n1\nn\n')
+has "неверный номер версии -> повтор" "$out" "Неверный выбор. Выберите от 1 до 2."
+has "после повтора выбрана r40" "$(cat "$W/log")" "https://osv/files/athena/Multi_TR3000/r40/ "
+out=$(flow "$P" athena aarch64 TR3000 '3\n00\n')
+has "00 в выборе версии -> главное меню" "$out" "MAIN_MENU"
+
+echo "== защита модели (п.9)"
+out=$(flow "$P" athena aarch64 TR3000 '2\nno\n')
 has "чужая модель: предупреждение" "$out" "не совпадает с моделью роутера: TR3000"
 has "чужая модель: отказ" "$out" "EXIT_FUNCTION"
 hasnt "чужая модель: каталог не открыт" "$(cat "$W/log")" "Xiaomi_AX3000T/ "
-out=$(flow "$P" keenboot aarch64 TR3000 '2\nyes\n')
+out=$(flow "$P" athena aarch64 TR3000 '2\nyes\n')
 hasnt "чужая модель: «yes» строчными не принимается" "$(cat "$W/log")" "Xiaomi_AX3000T/ "
-out=$(flow "$P" keenboot aarch64 TR3000 '2\nYES\n1\nn\n')
+out=$(flow "$P" athena aarch64 TR3000 '2\nYES\n1\nn\n')
 has "чужая модель: YES — продолжить" "$(cat "$W/log")" "https://osv/files/athena/Xiaomi_AX3000T/r41/ "
-out=$(flow "$P" keenboot aarch64 RAX3000ME '4\n1\nn\n')
+out=$(flow "$P" athena aarch64 RAX3000ME '4\n1\nn\n')
 hasnt "RAX3000Me -> CMCC_RAX3000M без YES (как в wiki Athena)" "$out" "не совпадает с моделью"
 has "RAX3000Me -> r41" "$(cat "$W/log")" "https://osv/files/athena/CMCC_RAX3000M/r41/ "
-out=$(flow "$P" keenboot aarch64 RAX3000ME '1\nno\n')
+out=$(flow "$P" athena aarch64 RAX3000ME '1\nno\n')
 has "RAX3000Me -> Cudy_TR3000: требует YES" "$out" "не совпадает с моделью роутера: RAX3000ME"
-out=$(flow "$P" keenboot aarch64 RAX3000M '4\n1\nn\n')
+out=$(flow "$P" athena aarch64 RAX3000M '4\n1\nn\n')
 hasnt "RAX3000M -> CMCC_RAX3000M без YES" "$out" "не совпадает с моделью"
-out=$(flow "$P" keenboot aarch64 "" '1\nno\n')
+out=$(flow "$P" athena aarch64 "" '1\nno\n')
 has "модель неизвестна -> подтверждение" "$out" "неизвестна"
 hasnt "модель неизвестна: каталог не открыт" "$(cat "$W/log")" "Cudy_TR3000/ "
-out=$(flow "$P" keenboot aarch64 TR3000 '3\n')
-has "несколько подпапок: без автоперехода" "$out" "нет файлов"
-hasnt "несколько подпапок: подпапки не открыты" "$(cat "$W/log")" "Multi_TR3000/r4"
 
-echo "== без изменений поведения (сравнение с оригиналом)"
-flow "$O" keenboot mipsel TR3000 '1\n1\nn\n' >"$W/o_out"
-cp "$W/log" "$W/o_log"
-flow "$P" keenboot mipsel TR3000 '1\n1\nn\n' >"$W/p_out"
-if cmp -s "$W/log" "$W/o_log" && cmp -s "$W/p_out" "$W/o_out"; then ok "п.8 mipsel: идентично оригиналу (запросы и вывод)"; else bad "п.8 mipsel: идентично оригиналу (запросы и вывод)" "$(diff "$W/o_log" "$W/log")"; fi
-has "п.8 mipsel: /files/keenboot/mipsel" "$(cat "$W/log")" "https://osv/files/keenboot/mipsel "
-flow "$O" firmware aarch64 TR3000 '1\n1\nn\n' >"$W/o_out"
-cp "$W/log" "$W/o_log"
-flow "$P" firmware aarch64 TR3000 '1\n1\nn\n' >"$W/p_out"
-if cmp -s "$W/log" "$W/o_log" && cmp -s "$W/p_out" "$W/o_out"; then ok "п.5: идентично оригиналу (запросы и вывод)"; else bad "п.5: идентично оригиналу (запросы и вывод)" "$(diff "$W/o_log" "$W/log")"; fi
-out=$(flow "$O" keenboot aarch64 TR3000 '1\n')
-has "контроль: оригинал на aarch64 идёт в /files/keenboot/aarch64" "$(cat "$W/log")" "https://osv/files/keenboot/aarch64 "
+echo "== п.5 и п.8 без изменений (сравнение с оригиналом)"
+same_flow() { # same_flow <название> <mode> <arch> <ввод>
+  flow "$O" "$2" "$3" TR3000 "$4" >"$W/o_out"
+  cp "$W/log" "$W/o_log"
+  flow "$P" "$2" "$3" TR3000 "$4" >"$W/p_out"
+  if cmp -s "$W/log" "$W/o_log" && cmp -s "$W/p_out" "$W/o_out"; then
+    ok "$1: идентично оригиналу (запросы и вывод)"
+  else
+    bad "$1: идентично оригиналу (запросы и вывод)" "$(diff "$W/o_log" "$W/log"; diff "$W/o_out" "$W/p_out")"
+  fi
+}
+same_flow "п.8 aarch64" keenboot aarch64 '1\n1\nn\n'
+has "п.8 aarch64: /files/keenboot/aarch64" "$(cat "$W/log")" "https://osv/files/keenboot/aarch64 "
+same_flow "п.8 aarch64, запись" keenboot aarch64 '1\n1\ny\n'
+same_flow "п.8 mipsel" keenboot mipsel '1\n1\nn\n'
+same_flow "п.5" firmware aarch64 '1\n1\nn\n'
+
+echo "== меню"
+grep -q '^    \[ "\$arch" != "aarch64" \] || echo "9. Athena OTA Update" # athena-patch$' "$PATCHED_KK" && ok "п.9 в меню только для aarch64" || bad "п.9 в меню только для aarch64"
+grep -q '^    9) ota_update "athena" ;; # athena-patch$' "$PATCHED_KK" && ok "обработчик 9)" || bad "обработчик 9)"
+grep -q '^    8) ota_update "keenboot" ;;$' "$PATCHED_KK" && ok "обработчик 8) без изменений" || bad "обработчик 8) без изменений"
 
 echo "== шапка: версия загрузчика"
 pbv() { $SH -c ". \"$1\"; parse_bootloader_version \"\$(printf '%b' \"\$2\")\"" _ "$2" "$3"; }
