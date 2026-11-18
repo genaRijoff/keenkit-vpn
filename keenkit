@@ -1,37 +1,41 @@
 #!/bin/sh
 # shellcheck shell=dash  # целевой shell — BusyBox ash (как dash: POSIX + local)
-# kvn (KeenVPN) — запуск KeenKit через VPN-интерфейс с раздельными OTA-источниками:
+# keenkit — запуск KeenKit через доступный канал (напрямую или VPN) с раздельными OTA-источниками:
 #   п.5 OTA Update (прошивки) -> FW_DOMAIN (Афина)
 #   п.8 KeenBOOT OTA Update    -> KB_BASE   (Стас)
 #   п.9 Athena OTA Update      -> FW_DOMAIN/files/athena (с athena-patch 0.0.4+, aarch64)
-# KeenKit не модифицируется: подменяется только curl через PATH (переживает обновления KeenKit).
+# Ставится вместо симлинка /opt/bin/keenkit; сам KeenKit (/opt/keenkit.sh) не меняется.
+# Каждый внешний запрос KeenKit идёт через каналы по порядку, начиная с последнего удачного;
+# при сетевой ошибке — повтор через следующий канал.
 #
 # Использование:
-#   kvn              выбрать первый рабочий канал из IFACES и запустить KeenKit;
-#                    если канал упадёт во время работы — запрос повторится через следующий
-#   kvn nwg1         только указанный интерфейс (без резерва); kvn direct — напрямую
-#   kvn check        проверка каналов, источников и совместимости с KeenKit
-#   kvn uninstall    удалить kvn
-# Настройки: /opt/etc/kvn.conf (создаётся при первом запуске)
+#   keenkit [аргументы]      запуск KeenKit (аргументы передаются KeenKit как есть)
+#   keenkit --iface nwg1     только этот канал, без резерва (direct — напрямую)
+#   keenkit --check          проверка каналов, источников и совместимости с KeenKit
+#   keenkit --vpn-remove     вернуть обычный запуск KeenKit (симлинк на /opt/keenkit.sh)
+#   keenkit --vpn-version    версия keenkit-vpn
+# Настройки: /opt/etc/keenkit-vpn.conf
 #   IFACES — каналы по порядку: direct (без туннеля), имена интерфейсов,
 #            auto (все wg*/nwg*, затем awg*/nawg*, затем mitun*). По умолчанию: direct auto
 
-VERSION="0.0.7"
+# keenkit-vpn-launcher
+VERSION="0.0.8"
 KK_TESTED="2.9.1 2.9.2 2.9.3 2.9.4 2.9.5"
 
 set -u
 
-# KVN_ROOT — только для тестов, на роутере пусто.
-ROOT="${KVN_ROOT:-}"
-SELF="$ROOT/opt/bin/kvn"
-CONF="$ROOT/opt/etc/kvn.conf"
-WRAP="$ROOT/opt/lib/kvn/curl"
+# KEENKIT_VPN_ROOT — только для тестов, на роутере пусто.
+ROOT="${KEENKIT_VPN_ROOT:-}"
+SELF="$ROOT/opt/bin/keenkit"
+CONF="$ROOT/opt/etc/keenkit-vpn.conf"
+OLD_CONF="$ROOT/opt/etc/kvn.conf"
+WRAP="$ROOT/opt/lib/keenkit-vpn/curl"
+STATE="$ROOT/tmp/keenkit-vpn.iface"
 KK_SCRIPT="$ROOT/opt/keenkit.sh"
 KK_CONF="$ROOT/opt/etc/KeenKit.conf"
 REAL_CURL="$ROOT/opt/bin/curl"
 NET_DIR="$ROOT/sys/class/net"
-STATE_DIR="$ROOT/tmp"
-ARCH="${KVN_ARCH:-$(uname -m)}"
+ARCH="${KEENKIT_VPN_ARCH:-$(uname -m)}"
 
 # Значения по умолчанию (переопределяются в $CONF)
 IFACES="direct auto"
@@ -71,7 +75,7 @@ require() {
 write_default_conf() {
   mkdir -p "${CONF%/*}" || die "Не удалось создать ${CONF%/*}"
   cat >"$CONF" <<EOF
-# kvn: каналы по порядку, используется первый рабочий, остальные — резерв.
+# keenkit-vpn: каналы по порядку; запрос идёт через последний удачный, при ошибке — через следующий.
 # direct — без туннеля; auto — все wg*/nwg*, awg*/nawg*, mitun*; или имена через пробел
 IFACES="$IFACES"
 # п.5 OTA Update — прошивки
@@ -106,6 +110,9 @@ iface_exists() {
 # Конфиг читается как данные, а не исполняется: только KEY="value" из известного списка.
 load_conf() {
   local line key val i
+  if [ ! -f "$CONF" ] && [ -f "$OLD_CONF" ]; then
+    mv -f "$OLD_CONF" "$CONF" && msg "Настройки перенесены: $OLD_CONF -> $CONF"
+  fi
   [ -f "$CONF" ] || write_default_conf
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "" | \#*) continue ;; esac
@@ -142,7 +149,7 @@ migrate_conf() {
   if sed "s/^IFACES=\"$OLD_DEFAULT_IFACES\"\$/IFACES=\"direct auto\"/" "$CONF" >"$TMP_FILE" &&
     chmod 600 "$TMP_FILE" && mv -f "$TMP_FILE" "$CONF"; then
     IFACES="direct auto"
-    msg "kvn.conf: IFACES «$OLD_DEFAULT_IFACES» -> «direct auto» (напрямую, затем все туннели)"
+    msg "keenkit-vpn.conf: IFACES «$OLD_DEFAULT_IFACES» -> «direct auto» (напрямую, затем все туннели)"
   else
     warn "Не удалось обновить $CONF, оставляю IFACES=\"$IFACES\""
   fi
@@ -214,32 +221,6 @@ expand_ifaces() {
   echo "${out# }"
 }
 
-# Канал рабочий, если через него доступны оба источника. Печатает причину отказа.
-probe_iface() {
-  local iface="$1"
-  if [ "$iface" = "direct" ]; then set --; else set -- --interface "$iface"; fi
-  if ! fetch "$@" -o /dev/null "$KB_URL/" >/dev/null 2>&1; then
-    warn "$(iface_label "$iface"): нет доступа к KeenBOOT ($KB_NAME)"
-    return 1
-  fi
-  if ! fetch "$@" -o /dev/null "$FW_DOMAIN/osvault/" >/dev/null 2>&1; then
-    warn "$(iface_label "$iface"): нет доступа к прошивкам ($FW_LABEL)"
-    return 1
-  fi
-}
-
-# Первый рабочий канал из списка $1.
-pick_iface() {
-  local i
-  for i in $1; do
-    if probe_iface "$i"; then
-      echo "$i"
-      return 0
-    fi
-  done
-  return 1
-}
-
 list_ifaces() {
   local f
   for f in "$NET_DIR"/*; do printf '%s ' "${f##*/}"; done
@@ -250,7 +231,7 @@ list_ifaces() {
 wrapper_body() {
   cat <<'WRAP'
 #!/bin/sh
-# Сгенерировано kvn, изменения будут перезаписаны.
+# Сгенерировано keenkit-vpn (/opt/bin/keenkit), изменения будут перезаписаны.
 # Внешние запросы идут через каналы $KK_IFACES по порядку (direct = без --interface), начиная
 # с последнего удачного ($KK_STATE). Сетевая ошибка -> повтор через следующий канал; ответ
 # сервера (404 и т.п.) не повторяется. $KK_FW/files/keenboot/* -> $KK_KB/files/keenboot/*.
@@ -285,8 +266,8 @@ if [ -n "$state" ] && [ -r "$state" ] && read -r last <"$state"; then
   esac
 fi
 
-out=$(mktemp "${TMPDIR:-/tmp}/kvn-out.XXXXXX") || exit 1
-err=$(mktemp "${TMPDIR:-/tmp}/kvn-err.XXXXXX") || { rm -f "$out"; exit 1; }
+out=$(mktemp "${TMPDIR:-/tmp}/keenkit-vpn-out.XXXXXX") || exit 1
+err=$(mktemp "${TMPDIR:-/tmp}/keenkit-vpn-err.XXXXXX") || { rm -f "$out"; exit 1; }
 trap 'rm -f "$out" "$err"' EXIT
 trap 'exit 130' INT TERM
 
@@ -304,7 +285,7 @@ for i in $ifaces; do
   5 | 6 | 7 | 16 | 28 | 35 | 52 | 55 | 56)
     if [ "$left" -gt 0 ]; then
       [ "$i" = "direct" ] && i="напрямую"
-      printf 'kvn: %s не отвечает (curl %s), повтор через следующий канал\n' "$i" "$rc" >&2
+      printf 'keenkit-vpn: %s не отвечает (curl %s), повтор через следующий канал\n' "$i" "$rc" >&2
       continue
     fi
     ;;
@@ -323,10 +304,12 @@ WRAP
 # Перезаписывает обёртку только при изменении содержимого (меньше записей во флеш).
 install_wrapper() {
   [ "$(cat "$WRAP" 2>/dev/null)" = "$(wrapper_body)" ] && [ -x "$WRAP" ] && return 0
-  mkdir -p "${WRAP%/*}" || die "Не удалось создать ${WRAP%/*}"
+  mkdir -p "${WRAP%/*}" || return 1
   TMP_FILE="$WRAP.$$"
   if ! { wrapper_body >"$TMP_FILE" && chmod 755 "$TMP_FILE" && mv -f "$TMP_FILE" "$WRAP"; }; then
-    die "Не удалось записать $WRAP"
+    rm -f "$TMP_FILE"
+    TMP_FILE=""
+    return 1
   fi
   TMP_FILE=""
 }
@@ -335,7 +318,7 @@ kk_version() {
   sed -n 's/^SCRIPT_VERSION="\(.*\)"$/\1/p' "$KK_SCRIPT" 2>/dev/null | head -n 1
 }
 
-# kvn опирается на внутренности KeenKit: путь /files/keenboot/ и формат KeenKit.conf.
+# keenkit-vpn опирается на внутренности KeenKit: путь /files/keenboot/ и формат KeenKit.conf.
 kk_compatible() {
   grep -q 'ota_path="/files/keenboot/' "$KK_SCRIPT" 2>/dev/null &&
     grep -qF "printf 'domain=\"%s\"" "$KK_SCRIPT" 2>/dev/null
@@ -352,63 +335,50 @@ kk_domain() {
 
 set_kk_domain() {
   [ "$(kk_domain)" = "$FW_DOMAIN" ] && return 0
-  if ! { mkdir -p "${KK_CONF%/*}" && printf 'domain="%s"\n' "$FW_DOMAIN" >"$KK_CONF"; }; then
-    die "Не удалось записать $KK_CONF"
-  fi
+  mkdir -p "${KK_CONF%/*}" && printf 'domain="%s"\n' "$FW_DOMAIN" >"$KK_CONF"
 }
 
 # ---------- команды ----------
 
+# Запуск KeenKit. Ошибки keenkit-vpn не мешают запуску: в худшем случае KeenKit стартует как обычно.
 cmd_run() {
-  local iface cands reserve failed seen i labels
-  [ -x "$REAL_CURL" ] || die "Нет $REAL_CURL (opkg install curl)"
+  local cands i labels
   [ -f "$KK_SCRIPT" ] || die "KeenKit не установлен ($KK_SCRIPT)"
+  if [ ! -x "$REAL_CURL" ]; then
+    warn "keenkit-vpn: нет $REAL_CURL — KeenKit запускается без выбора канала"
+    exec sh "$KK_SCRIPT" "$@"
+  fi
   if kk_athena_v1; then
-    warn "KeenKit изменён старым патчем Athena v1 — обнови: sh athena-patch.sh"
+    warn "KeenKit изменён старым патчем Athena v1 — обнови: athena-patch"
   elif ! kk_compatible; then
     warn "KeenKit $(kk_version): структура OTA изменилась, KeenBOOT может пойти не через $KB_NAME"
   fi
-  if [ -n "$1" ]; then
-    [ "$1" = "direct" ] || iface_exists "$1" || die "Интерфейс $1 не найден. Есть: $(list_ifaces)"
-    cands="$1"
+  if [ -n "$FORCE_IFACE" ]; then
+    cands="$FORCE_IFACE"
   else
     cands=$(expand_ifaces)
-    [ -n "$cands" ] || die "Ни одного канала из IFACES=\"$IFACES\" нет на роутере. Есть: $(list_ifaces)"
-  fi
-  iface=$(pick_iface "$cands") || die "Нет рабочего канала ($cands). Проверка: kvn check"
-  # Резерв: сначала каналы после выбранного, в конце — не прошедшие проверку при запуске
-  reserve="" failed="" seen=0
-  for i in $cands; do
-    if [ "$i" = "$iface" ]; then
-      seen=1
-    elif [ "$seen" = 1 ]; then
-      reserve="$reserve $i"
-    else
-      failed="$failed $i"
+    if [ -z "$cands" ]; then
+      warn "keenkit-vpn: ни одного канала из IFACES=\"$IFACES\" нет на роутере — только напрямую"
+      cands="direct"
     fi
-  done
-  reserve=${reserve# }
-  failed=${failed# }
-  reserve="$reserve${failed:+${reserve:+ }$failed}"
-  install_wrapper
-  set_kk_domain
+  fi
+  if ! install_wrapper; then
+    warn "keenkit-vpn: не удалось записать $WRAP — KeenKit запускается без выбора канала"
+    exec sh "$KK_SCRIPT" "$@"
+  fi
+  set_kk_domain || warn "keenkit-vpn: не удалось записать $KK_CONF"
+  labels=""
+  for i in $cands; do labels="$labels -> $(iface_label "$i")"; done
   printf '%bПрошивки:%b %b%s%b  %bKeenBOOT:%b %b%s%b' \
     "$CYAN" "$NC" "$GREEN" "$FW_LABEL" "$NC" \
     "$CYAN" "$NC" "$GREEN" "$KB_NAME" "$NC"
   if athena_menu9 && [ "$ARCH" = "aarch64" ]; then
     printf '  %bAthena:%b %bп.9%b' "$CYAN" "$NC" "$GREEN" "$NC"
   fi
-  printf '  %bИнтерфейс:%b %b%s%b' "$CYAN" "$NC" "$GREEN" "$(iface_label "$iface")" "$NC"
-  if [ -n "$reserve" ]; then
-    labels=""
-    for i in $reserve; do labels="$labels $(iface_label "$i")"; done
-    printf ' (резерв:%s)' "$labels"
-  fi
-  printf '\n'
-  mkdir -p "$STATE_DIR" 2>/dev/null || true
-  KK_IFACES="$iface${reserve:+ $reserve}" KK_STATE="$STATE_DIR/kvn-iface.$$" \
-    KK_FW="$FW_DOMAIN" KK_KB="$KB_BASE" KK_REAL="$REAL_CURL" \
-    PATH="${WRAP%/*}:$PATH" exec sh "$KK_SCRIPT"
+  printf '  %bКаналы:%b %b%s%b\n' "$CYAN" "$NC" "$GREEN" "${labels# -> }" "$NC"
+  mkdir -p "${STATE%/*}" 2>/dev/null || true
+  KK_IFACES="$cands" KK_STATE="$STATE" KK_FW="$FW_DOMAIN" KK_KB="$KB_BASE" KK_REAL="$REAL_CURL" \
+    PATH="${WRAP%/*}:$PATH" exec sh "$KK_SCRIPT" "$@"
 }
 
 http_code() {
@@ -438,7 +408,7 @@ check_row() {
 cmd_check() {
   [ -x "$REAL_CURL" ] || die "Нет $REAL_CURL"
   local v d i a cands labels
-  printf '%bkvn %s%b\n' "$CYAN" "$VERSION" "$NC"
+  printf '%bkeenkit-vpn %s%b\n' "$CYAN" "$VERSION" "$NC"
   printf 'Прошивки (%s): %s\n' "$FW_LABEL" "$FW_DOMAIN"
   printf 'KeenBOOT (%s): %s\n' "$KB_NAME" "$KB_URL"
 
@@ -446,9 +416,9 @@ cmd_check() {
   if [ ! -f "$KK_SCRIPT" ]; then
     printf 'KeenKit: %bне установлен%b\n' "$RED" "$NC"
   elif kk_athena_v1; then
-    printf 'KeenKit: %b%s — старый патч Athena v1, обнови: sh athena-patch.sh%b\n' "$YELLOW" "$v" "$NC"
+    printf 'KeenKit: %b%s — старый патч Athena v1, обнови: athena-patch%b\n' "$YELLOW" "$v" "$NC"
   elif ! kk_compatible; then
-    printf 'KeenKit: %b%s — структура OTA изменилась, нужна проверка kvn%b\n' "$RED" "$v" "$NC"
+    printf 'KeenKit: %b%s — структура OTA изменилась, нужна проверка keenkit-vpn%b\n' "$RED" "$v" "$NC"
   else
     case " $KK_TESTED " in
     *" $v "*) printf 'KeenKit: %b%s OK%b\n' "$GREEN" "$v" "$NC" ;;
@@ -471,13 +441,16 @@ cmd_check() {
   if [ "$d" = "$FW_DOMAIN" ]; then
     printf 'KeenKit.conf: %bOK%b\n' "$GREEN" "$NC"
   else
-    printf 'KeenKit.conf: %b%s%b (исправится при запуске kvn)\n' "$YELLOW" "${d:-не задан}" "$NC"
+    printf 'KeenKit.conf: %b%s%b (исправится при запуске keenkit)\n' "$YELLOW" "${d:-не задан}" "$NC"
   fi
 
   cands=$(expand_ifaces)
   labels=""
   for i in $cands; do labels="$labels -> $(iface_label "$i")"; done
   printf 'Порядок каналов: %s\n' "${labels# -> }"
+  if [ -r "$STATE" ] && read -r i <"$STATE"; then
+    printf 'Последний удачный: %s\n' "$(iface_label "$i")"
+  fi
   printf '\n'
   check_row "напрямую"
   for i in $cands; do
@@ -485,27 +458,48 @@ cmd_check() {
   done
 }
 
-cmd_uninstall() {
+cmd_remove() {
   local answer
-  printf 'Удалить kvn (%s, %s, %s)? (y/n) ' "$SELF" "${WRAP%/*}" "$CONF"
+  printf 'Вернуть обычный запуск KeenKit (%s -> %s) и удалить %s, %s? (y/n) ' \
+    "$SELF" "${KK_SCRIPT#"$ROOT"}" "${WRAP%/*}" "$CONF"
   read -r answer || exit 1
   case "$answer" in
   y | Y)
-    rm -rf "${WRAP%/*}" && rm -f "$CONF" "$SELF" &&
-      printf '%bУдалено. KeenKit.conf не тронут.%b\n' "$GREEN" "$NC"
+    if ln -sf "${KK_SCRIPT#"$ROOT"}" "$SELF.new.$$" && mv -f "$SELF.new.$$" "$SELF"; then
+      rm -rf "${WRAP%/*}"
+      rm -f "$CONF" "$STATE"
+      printf '%bГотово: keenkit снова запускает KeenKit напрямую. KeenKit.conf не тронут.%b\n' "$GREEN" "$NC"
+    else
+      rm -f "$SELF.new.$$"
+      die "Не удалось вернуть симлинк $SELF"
+    fi
     ;;
   *) msg "Отменено" ;;
   esac
 }
 
-require sed grep head cat mkdir chmod mv rm uname
+require sed grep head cat mkdir chmod mv rm uname ln
 
+FORCE_IFACE=""
 case "${1:-}" in
--h | --help) sed -n '3,/^$/p' "$0" | sed 's/^# \{0,1\}//' ;;
--V | --version) echo "$VERSION" ;;
-check) load_conf && resolve_kb_source && cmd_check ;;
-uninstall) cmd_uninstall ;;
-"") load_conf && resolve_kb_source && cmd_run "" ;;
--*) die "Неизвестный параметр: $1 (kvn --help)" ;;
-*) load_conf && resolve_kb_source && cmd_run "$1" ;;
+--vpn-help) sed -n '3,/^$/p' "$0" | sed 's/^# \{0,1\}//' ;;
+--vpn-version) echo "$VERSION" ;;
+--check) load_conf && resolve_kb_source && cmd_check ;;
+--vpn-remove) cmd_remove ;;
+--iface)
+  [ -n "${2:-}" ] || die "Укажи канал: keenkit --iface nwg1 (или direct)"
+  [ "$2" = "direct" ] || iface_exists "$2" || die "Интерфейс $2 не найден. Есть: $(list_ifaces)"
+  FORCE_IFACE="$2"
+  shift 2
+  load_conf && resolve_kb_source && cmd_run "$@"
+  ;;
+*)
+  # Ошибка в настройках не должна мешать запуску KeenKit
+  if ! (load_conf) >/dev/null; then
+    warn "keenkit-vpn: ошибка в $CONF — KeenKit запускается без выбора канала"
+    [ -f "$KK_SCRIPT" ] || die "KeenKit не установлен ($KK_SCRIPT)"
+    exec sh "$KK_SCRIPT" "$@"
+  fi
+  load_conf && resolve_kb_source && cmd_run "$@"
+  ;;
 esac

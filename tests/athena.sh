@@ -46,7 +46,7 @@ eq "метка версии патча" "$(sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/
 same "копия оригинала" "$R/opt/keenkit.sh.$VER.orig" "$SRC"
 [ -L "$R/opt/bin/keenkit" ] && ok "симлинк сохранён" || bad "симлинк сохранён"
 $SH -n "$(T)" && ok "синтаксис пропатченного KeenKit" || bad "синтаксис пропатченного KeenKit"
-grep -q '^    ota_path="/files/keenboot/\$arch"$' "$(T)" && ok "оригинальная строка ota_path на месте (kvn)" || bad "оригинальная строка ota_path на месте (kvn)"
+grep -q '^    ota_path="/files/keenboot/\$arch"$' "$(T)" && ok "оригинальная строка ota_path на месте (keenkit-vpn)" || bad "оригинальная строка ota_path на месте (keenkit-vpn)"
 eq "домен OTA" "$(cat "$R/opt/etc/KeenKit.conf")" 'domain="https://osvault.project-athens.com"'
 eq "временных файлов нет" "$(leftovers)" 0
 cp "$(T)" "$R/patched.ref"

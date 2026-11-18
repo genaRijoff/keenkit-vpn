@@ -1,12 +1,14 @@
 #!/bin/sh
-# Тесты kvn в изолированном корне (KVN_ROOT) с поддельными curl, /sys/class/net и KeenKit.
+# Тесты keenkit-vpn (лаунчер /opt/bin/keenkit и install.sh) в изолированном корне
+# (KEENKIT_VPN_ROOT) с поддельными curl, /sys/class/net и KeenKit.
 # shellcheck disable=SC2015,SC2016  # ok/bad всегда возвращают 0; $(...) в тесте конфига — намеренно литерал
-# Запуск: sh tests/run.sh [путь к kvn]   (рекомендуется: busybox sh tests/run.sh)
+# Запуск: sh tests/run.sh [путь к keenkit]   (рекомендуется: TEST_SH="busybox sh" sh tests/run.sh)
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-KVN=${1:-$HERE/../kvn}
+LAUNCHER=${1:-$HERE/../keenkit}
 INSTALL=${INSTALL:-$HERE/../install.sh}
 SH=${TEST_SH:-sh}
+VER=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$LAUNCHER")
 PASS=0
 FAIL=0
 T=""
@@ -16,14 +18,14 @@ bad() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; [ -n "${2:-}" ] && printf
 has() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "нет «$3» в: $2" ;; esac; }
 hasnt() { case "$2" in *"$3"*) bad "$1" "лишнее «$3» в: $2" ;; *) ok "$1" ;; esac; }
 eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "ожидалось «$3», получено «$2»"; fi; }
+logline() { grep -qxF -- "$2" "$T/curl.log" && ok "$1" || bad "$1" "нет строки «$2» в журнале:
+$(cat "$T/curl.log")"; }
+nologline() { grep -qxF -- "$2" "$T/curl.log" && bad "$1" "лишняя строка «$2»" || ok "$1"; }
 
-setup() {
-  T=$(mktemp -d)
-  mkdir -p "$T/opt/bin" "$T/opt/etc" "$T/tmp" "$T/sys/class/net/nwg0" "$T/sys/class/net/nwg1" "$T/sys/class/net/eth0"
-  touch "$T/dead_direct"
-  cp "$KVN" "$T/opt/bin/kvn"
-  # Поддельный curl: пишет аргументы в лог; $T/dead_<iface> — канал мёртв (dead_direct — без туннеля),
-  # $T/dead_fw — osvault недоступен. По умолчанию провайдер блокирует (dead_direct)
+# Поддельный curl: пишет аргументы в журнал.
+#   $T/dead_<iface> — канал мёртв (dead_direct — без туннеля), $T/dead_fw — osvault недоступен.
+# По умолчанию провайдер блокирует (dead_direct).
+fake_curl() {
   cat >"$T/opt/bin/curl" <<EOF
 #!/bin/sh
 echo "\$*" >>"$T/curl.log"
@@ -43,195 +45,229 @@ case "\$*" in *http_code*) printf 200 ;; esac
 exit 0
 EOF
   chmod +x "$T/opt/bin/curl"
-  # Поддельный KeenKit: маркеры совместимости и типовые вызовы п.5/п.8/RCI
+}
+
+# Поддельный KeenKit: маркеры совместимости и типовые вызовы п.5/п.8/RCI
+fake_keenkit() {
   cat >"$T/opt/keenkit.sh" <<EOF
 #!/bin/sh
 SCRIPT_VERSION="2.9.2"
 # ota_path="/files/keenboot/\$arch"
 # printf 'domain="%s"\n' "\$domain" > "\$CONFIG_FILE"
-echo "KK IFACES=\$KK_IFACES"
-D=\$(sed -n 's/^domain="\(.*\)"\$/\1/p' "$T/opt/etc/KeenKit.conf")
+echo "KK ARGS=\$*"
+echo "KK IFACES=\${KK_IFACES:-}"
+D=\$(sed -n 's/^domain="\(.*\)"\$/\1/p' "$T/opt/etc/KeenKit.conf" 2>/dev/null)
 curl -s "http://127.0.0.1:79/rci/show/version"
 curl -fLs --basic "\$D/osvault"
 curl -fLs --basic "\$D/files/keenboot/aarch64" -I
 curl -fLs --basic "\$D/files/keenboot/aarch64/KB-51/KeenBOOT TR3000.bin" --output "/tmp/a b.bin"
 EOF
-  : >"$T/curl.log"
 }
 
-run() { KVN_ROOT="$T" PATH="$T/opt/bin:$PATH" $SH "$T/opt/bin/kvn" "$@" 2>&1; }
+setup() {
+  T=$(mktemp -d)
+  mkdir -p "$T/opt/bin" "$T/opt/etc" "$T/tmp" "$T/sys/class/net/nwg0" "$T/sys/class/net/nwg1" "$T/sys/class/net/eth0"
+  touch "$T/dead_direct"
+  cp "$LAUNCHER" "$T/opt/bin/keenkit"
+  fake_curl
+  fake_keenkit
+  : >"$T/curl.log"
+}
 teardown() { rm -rf "$T"; }
+run() { KEENKIT_VPN_ROOT="$T" PATH="$T/opt/bin:$PATH" $SH "$T/opt/bin/keenkit" "$@" 2>&1; }
+ext_log() { grep -v '127.0.0.1' "$T/curl.log"; }
 
-echo "== запуск через nwg0"
+echo "== запуск keenkit (провайдер блокирует, туннели есть)"
 setup
 out=$(run)
 eq "код возврата 0" "$?" 0
-has "шапка" "$out" "Прошивки: Афина  KeenBOOT: Стас  Интерфейс: nwg0 (резерв: nwg1 напрямую)"
-has "KeenKit запущен через nwg0" "$out" "KK IFACES=nwg0 nwg1 direct"
-log=$(cat "$T/curl.log")
-has "RCI без --interface" "$log" "-s http://127.0.0.1:79/rci/show/version"
-hasnt "RCI не через туннель" "$log" "--interface nwg0 -s http://127.0.0.1"
-has "п.5 -> Афина через nwg0" "$log" "--interface nwg0 -fLs --basic https://osvault.project-athens.com/osvault"
-has "п.8 листинг -> Стас" "$log" "--interface nwg0 -fLs --basic https://spatiumstas.github.io/KeenKit/files/keenboot/aarch64 -I"
-has "п.8 файл с пробелом -> Стас" "$log" "https://spatiumstas.github.io/KeenKit/files/keenboot/aarch64/KB-51/KeenBOOT TR3000.bin --output /tmp/a b.bin"
+has "шапка" "$out" "Прошивки: Афина  KeenBOOT: Стас  Каналы: напрямую -> nwg0 -> nwg1"
+has "KeenKit запущен с каналами" "$out" "KK IFACES=direct nwg0 nwg1"
+hasnt "старт без проверочных запросов" "$(cat "$T/curl.log")" "-o /dev/null"
+logline "RCI без --interface" "-s http://127.0.0.1:79/rci/show/version"
+logline "п.5: попытка напрямую" "-fLs --basic https://osvault.project-athens.com/osvault"
+logline "п.5: повтор через nwg0" "--interface nwg0 -fLs --basic https://osvault.project-athens.com/osvault"
+has "сообщение о переключении" "$out" "keenkit-vpn: напрямую не отвечает (curl 7), повтор через следующий канал"
+logline "п.8 -> Стас сразу через запомненный nwg0" "--interface nwg0 -fLs --basic https://spatiumstas.github.io/KeenKit/files/keenboot/aarch64 -I"
+nologline "п.8: без лишней попытки напрямую" "-fLs --basic https://spatiumstas.github.io/KeenKit/files/keenboot/aarch64 -I"
+logline "файл с пробелом в имени" "--interface nwg0 -fLs --basic https://spatiumstas.github.io/KeenKit/files/keenboot/aarch64/KB-51/KeenBOOT TR3000.bin --output /tmp/a b.bin"
+eq "запомнен удачный канал" "$(cat "$T/tmp/keenkit-vpn.iface")" "nwg0"
 eq "KeenKit.conf записан" "$(cat "$T/opt/etc/KeenKit.conf")" 'domain="https://osvault.project-athens.com"'
-[ -x "$T/opt/lib/kvn/curl" ] && ok "обёртка установлена" || bad "обёртка установлена"
-m1=$(ls -l --time-style=+%s%N "$T/opt/lib/kvn/curl" 2>/dev/null || stat -c %Y "$T/opt/lib/kvn/curl")
+[ -x "$T/opt/lib/keenkit-vpn/curl" ] && ok "обёртка установлена" || bad "обёртка установлена"
+m1=$(ls -l --time-style=+%s%N "$T/opt/lib/keenkit-vpn/curl" 2>/dev/null || stat -c %Y "$T/opt/lib/keenkit-vpn/curl")
 sleep 1
-run >/dev/null
-m2=$(ls -l --time-style=+%s%N "$T/opt/lib/kvn/curl" 2>/dev/null || stat -c %Y "$T/opt/lib/kvn/curl")
+: >"$T/curl.log"
+out=$(run)
+m2=$(ls -l --time-style=+%s%N "$T/opt/lib/keenkit-vpn/curl" 2>/dev/null || stat -c %Y "$T/opt/lib/keenkit-vpn/curl")
 eq "обёртка не перезаписывается без изменений" "$m2" "$m1"
+eq "повторный запуск: первый запрос через запомненный канал" "$(ext_log | head -n 1)" "--interface nwg0 -fLs --basic https://osvault.project-athens.com/osvault"
+out=$(run script_update)
+has "аргументы передаются KeenKit" "$out" "KK ARGS=script_update"
 teardown
 
-echo "== отказоустойчивость"
+echo "== прямой доступ работает"
 setup
-touch "$T/dead_nwg0"
+rm -f "$T/dead_direct"
 out=$(run)
-has "nwg0 мёртв -> предупреждение" "$out" "nwg0: нет доступа к KeenBOOT (Стас)"
-has "переключение на nwg1" "$out" "Интерфейс: nwg1"
-rm "$T/dead_nwg0"; touch "$T/dead_fw"
+logline "п.5 напрямую" "-fLs --basic https://osvault.project-athens.com/osvault"
+nologline "туннель не используется" "--interface nwg0 -fLs --basic https://osvault.project-athens.com/osvault"
+eq "запомнен direct" "$(cat "$T/tmp/keenkit-vpn.iface")" "direct"
+hasnt "без сообщений о переключении" "$out" "не отвечает"
+teardown
+
+echo "== --iface"
+setup
+out=$(run --iface nwg1)
+has "--iface nwg1: только nwg1" "$out" "KK IFACES=nwg1"
+has "--iface nwg1: шапка" "$out" "Каналы: nwg1"
+out=$(run --iface nwg1 script_update)
+has "--iface: аргументы KeenKit после канала" "$out" "KK ARGS=script_update"
+out=$(run --iface direct)
+has "--iface direct" "$out" "KK IFACES=direct"
+out=$(run --iface nwg7); rc=$?
+eq "--iface nwg7: rc=1" "$rc" 1
+has "--iface nwg7: причина" "$out" "Интерфейс nwg7 не найден"
+out=$(run --iface 'nwg0;id'); rc=$?
+eq "--iface с инъекцией: rc=1" "$rc" 1
+hasnt "--iface с инъекцией: id не выполнен" "$out" "uid="
+out=$(run --iface); rc=$?
+eq "--iface без значения: rc=1" "$rc" 1
+teardown
+
+echo "== сбои keenkit-vpn не мешают запуску KeenKit"
+setup
+printf 'FW_DOMAIN="https://a.b/"\n' >"$T/opt/etc/keenkit-vpn.conf"
+out=$(run)
+has "ошибка в настройках: KeenKit всё равно запущен" "$out" "KK ARGS="
+has "ошибка в настройках: предупреждение" "$out" "ошибка в $T/opt/etc/keenkit-vpn.conf"
+has "ошибка в настройках: запуск без каналов" "$out" "KK IFACES="
+hasnt "ошибка в настройках: без шапки каналов" "$out" "Каналы:"
+teardown
+setup
+printf 'IFACES="nwg9"\n' >"$T/opt/etc/keenkit-vpn.conf"
+out=$(run)
+has "нет ни одного интерфейса из IFACES -> напрямую" "$out" "KK IFACES=direct"
+has "нет интерфейсов: предупреждение" "$out" "только напрямую"
+teardown
+setup
+mv "$T/opt/bin/curl" "$T/realcurl"
+out=$(KEENKIT_VPN_ROOT="$T" PATH="$T/opt/bin:/usr/bin:/bin" $SH "$T/opt/bin/keenkit" 2>&1)
+has "нет curl: KeenKit запущен без выбора канала" "$out" "KK ARGS="
+has "нет curl: предупреждение" "$out" "без выбора канала"
+teardown
+setup
+rm -f "$T/opt/keenkit.sh"
 out=$(run); rc=$?
-has "osvault недоступен -> причина" "$out" "нет доступа к прошивкам (Афина)"
-eq "все каналы без osvault -> rc=1" "$rc" 1
-rm "$T/dead_fw"
-out=$(run nwg7); rc=$?
-has "несуществующий интерфейс" "$out" "Интерфейс nwg7 не найден"
-eq "rc=1" "$rc" 1
-out=$(run 'nwg0;id'); rc=$?
-eq "инъекция в имени интерфейса -> rc=1" "$rc" 1
-hasnt "id не выполнен" "$out" "uid="
+eq "KeenKit не установлен: rc=1" "$rc" 1
+has "KeenKit не установлен: причина" "$out" "KeenKit не установлен"
 teardown
 
-echo "== конфиг"
+echo "== настройки"
 setup
-run check >/dev/null
-[ -f "$T/opt/etc/kvn.conf" ] && ok "конфиг создан" || bad "конфиг создан"
-eq "права 600" "$(stat -c %a "$T/opt/etc/kvn.conf")" 600
-printf 'IFACES="nwg1"\nPROBE_URL="https://x/"\n' >"$T/opt/etc/kvn.conf"
+run --check >/dev/null
+[ -f "$T/opt/etc/keenkit-vpn.conf" ] && ok "конфиг создан" || bad "конфиг создан"
+eq "права 600" "$(stat -c %a "$T/opt/etc/keenkit-vpn.conf")" 600
+has "по умолчанию direct auto" "$(cat "$T/opt/etc/keenkit-vpn.conf")" 'IFACES="direct auto"'
+teardown
+setup
+printf 'IFACES="nwg1"\n' >"$T/opt/etc/kvn.conf"
 out=$(run)
-has "старый конфиг (PROBE_URL) принят, IFACES применён" "$out" "Интерфейс: nwg1"
+has "kvn.conf переносится" "$out" "Настройки перенесены"
+has "kvn.conf: значение применено" "$out" "KK IFACES=nwg1"
+[ ! -e "$T/opt/etc/kvn.conf" ] && ok "kvn.conf удалён после переноса" || bad "kvn.conf удалён после переноса"
+teardown
+setup
+printf 'IFACES="nwg1"\nPROBE_URL="https://x/"\n' >"$T/opt/etc/keenkit-vpn.conf"
+out=$(run)
+has "старый ключ PROBE_URL принимается" "$out" "KK IFACES=nwg1"
 hasnt "PROBE_URL без предупреждения" "$out" "неизвестный параметр"
-printf 'IFACES="nwg0"\nFW_LABEL="$(touch %s/pwned)"\n' "$T" >"$T/opt/etc/kvn.conf"
-out=$(run); rc=$?
-eq "подстановка команды в конфиге -> rc=1" "$rc" 1
+printf 'IFACES="nwg0"\nFW_LABEL="$(touch %s/pwned)"\n' "$T" >"$T/opt/etc/keenkit-vpn.conf"
+out=$(run --check); rc=$?
+eq "подстановка команды в конфиге: --check rc=1" "$rc" 1
+out=$(run)
 [ -e "$T/pwned" ] && bad "конфиг не исполняется" || ok "конфиг не исполняется"
-printf 'IFACES="nwg0"\nFW_DOMAIN="https://a.b/"\n' >"$T/opt/etc/kvn.conf"
-out=$(run); rc=$?
-has "слеш в конце домена" "$out" "FW_DOMAIN: нужен"
-printf 'IFACES="nwg0 bad;name"\n' >"$T/opt/etc/kvn.conf"
-out=$(run); rc=$?
+printf 'IFACES="nwg0 bad;name"\n' >"$T/opt/etc/keenkit-vpn.conf"
+out=$(run --check)
 has "плохое имя в IFACES" "$out" "недопустимое имя интерфейса"
-printf 'IFACES="nwg0"\nFOO="1"\n' >"$T/opt/etc/kvn.conf"
+printf 'IFACES="nwg0"\nFOO="1"\n' >"$T/opt/etc/keenkit-vpn.conf"
 out=$(run)
 has "неизвестный ключ -> предупреждение" "$out" "неизвестный параметр «FOO»"
+printf 'IFACES="nwg0 nwg1 nwg2"\nFW_LABEL="Афина"\n' >"$T/opt/etc/keenkit-vpn.conf"
+out=$(run --check)
+has "старое значение по умолчанию -> direct auto" "$out" "IFACES «nwg0 nwg1 nwg2» -> «direct auto»"
+eq "миграция: конфиг обновлён" "$(cat "$T/opt/etc/keenkit-vpn.conf")" "$(printf 'IFACES="direct auto"\nFW_LABEL="Афина"')"
+printf 'IFACES="nwg1 nwg0"\n' >"$T/opt/etc/keenkit-vpn.conf"
+out=$(run --check)
+eq "своё значение IFACES не трогается" "$(cat "$T/opt/etc/keenkit-vpn.conf")" 'IFACES="nwg1 nwg0"'
 teardown
 
-echo "== совместимость с KeenKit"
+echo "== --check"
+setup
+mkdir -p "$T/sys/class/net/wg5" "$T/sys/class/net/awg0" "$T/sys/class/net/nawg1" "$T/sys/class/net/mitun0"
+out=$(run --check)
+has "версия" "$out" "keenkit-vpn $VER"
+has "KeenKit OK" "$out" "KeenKit: 2.9.2 OK"
+has "KeenKit.conf ещё не задан" "$out" "не задан"
+has "auto: порядок wg/nwg -> awg/nawg -> mitun" "$out" "Порядок каналов: напрямую -> nwg0 -> nwg1 -> wg5 -> awg0 -> nawg1 -> mitun0"
+has "строка канала" "$out" "mitun0 (203.0.113.9): KeenBOOT"
+hasnt "eth0 не в каналах" "$out" "eth0 ("
+hasnt "без последнего удачного до запуска" "$out" "Последний удачный"
+run >/dev/null
+out=$(run --check)
+has "последний удачный канал" "$out" "Последний удачный: nwg0"
+eq "--vpn-version" "$(run --vpn-version)" "$VER"
+has "--vpn-help" "$(run --vpn-help)" "keenkit --iface nwg1"
+teardown
+
+echo "== совместимость с KeenKit и athena-patch"
 setup
 sed -i '/ota_path/d' "$T/opt/keenkit.sh"
 out=$(run)
 has "изменённый KeenKit -> предупреждение" "$out" "структура OTA изменилась"
-out=$(run check)
-has "check показывает несовместимость" "$out" "нужна проверка kvn"
-teardown
-setup
-out=$(run check)
-has "check: версия KeenKit" "$out" "KeenKit: 2.9.2 OK"
-has "check: конфиг KeenKit ещё не задан" "$out" "не задан"
-has "check: строка канала" "$out" "nwg0 (203.0.113.9): KeenBOOT"
-hasnt "check: eth0 не в IFACES" "$out" "eth0 ("
-teardown
-
-echo "== athena-patch 0.0.4+: отдельный п.9"
-setup
-sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.4"\n    9) ota_update "athena" ;; # athena-patch|' "$T/opt/keenkit.sh"
-export KVN_ARCH=aarch64
-out=$(run)
-has "п.9: шапка KeenBOOT Стас + Athena п.9" "$out" "KeenBOOT: Стас  Athena: п.9  Интерфейс: nwg0"
-has "п.9: канал проверяется по Pages (KeenBOOT)" "$(cat "$T/curl.log")" "--interface nwg0 -o /dev/null https://spatiumstas.github.io/KeenKit/"
-out=$(run check)
-has "check: п.9" "$out" "Athena-патч: 0.0.4 (п.9 -> Athena, https://osvault.project-athens.com/files/athena)"
-has "check: KeenBOOT Стас" "$out" "KeenBOOT (Стас): https://spatiumstas.github.io/KeenKit"
-export KVN_ARCH=mipsel
-out=$(run)
-hasnt "mipsel: без Athena в шапке" "$out" "Athena: п.9"
-out=$(run check)
-has "mipsel: Athena недоступна" "$out" "mipsel: Athena недоступна"
-unset KVN_ARCH
-teardown
-
-echo "== athena-patch 0.0.2–0.0.3: Athena в п.8"
-setup
-sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.3"\n    [ "$arch" != "aarch64" ] \|\| ota_path="/files/athena" # athena-patch|' "$T/opt/keenkit.sh"
-export KVN_ARCH=aarch64
-out=$(run)
-has "aarch64 + патч: шапка KeenBOOT Афина" "$out" "KeenBOOT: Афина"
-has "aarch64 + патч: проверка канала по /files/athena" "$(cat "$T/curl.log")" "--interface nwg0 -o /dev/null https://osvault.project-athens.com/files/athena/"
-hasnt "aarch64 + патч: Pages не проверяется" "$(grep -- '-o /dev/null' "$T/curl.log")" "spatiumstas.github.io"
-out=$(run check)
-has "check: строка патча" "$out" "Athena-патч: 0.0.3 (п.8 -> Athena; обнови: athena-patch)"
-has "check: источник KeenBOOT" "$out" "KeenBOOT (Афина): https://osvault.project-athens.com/files/athena"
-export KVN_ARCH=mipsel
-out=$(run)
-has "mipsel + патч: KeenBOOT Стас" "$out" "KeenBOOT: Стас"
-out=$(run check)
-has "mipsel + патч: Athena недоступна" "$out" "mipsel: Athena недоступна"
-unset KVN_ARCH
+has "изменённый KeenKit: всё равно запущен" "$out" "KK ARGS="
+out=$(run --check)
+has "check показывает несовместимость" "$out" "нужна проверка keenkit-vpn"
 teardown
 setup
 sed -i 's|^# ota_path=.*|    ota_path="/files/athena"|' "$T/opt/keenkit.sh"
 out=$(run)
 has "патч v1: предупреждение" "$out" "старым патчем Athena v1"
-out=$(run check)
-has "check: патч v1" "$out" "старый патч Athena v1"
 teardown
-
-echo "== каналы: direct, auto, миграция"
 setup
-rm -f "$T/dead_direct"
+sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.4"\n    9) ota_update "athena" ;; # athena-patch|' "$T/opt/keenkit.sh"
+export KEENKIT_VPN_ARCH=aarch64
 out=$(run)
-has "провайдер не блокирует: напрямую, туннели в резерве" "$out" "Интерфейс: напрямую (резерв: nwg0 nwg1)"
-grep -qx -- '-fLs --basic https://osvault.project-athens.com/osvault' "$T/curl.log" && ok "напрямую: запрос без --interface" || bad "напрямую: запрос без --interface" "$(cat "$T/curl.log")"
-mkdir -p "$T/sys/class/net/wg5" "$T/sys/class/net/awg0" "$T/sys/class/net/nawg1" "$T/sys/class/net/mitun0"
-out=$(run check)
-has "auto: порядок wg/nwg -> awg/nawg -> mitun" "$out" "Порядок каналов: напрямую -> nwg0 -> nwg1 -> wg5 -> awg0 -> nawg1 -> mitun0"
-has "check: строка mitun0" "$out" "mitun0 (203.0.113.9)"
-out=$(run direct)
-has "kvn direct: без резерва" "$out" "Интерфейс: напрямую"
-hasnt "kvn direct: резерв не добавляется" "$out" "резерв"
-out=$(run nwg1)
-has "kvn nwg1: только nwg1" "$out" "Интерфейс: nwg1"
-hasnt "kvn nwg1: без резерва" "$out" "резерв"
-touch "$T/dead_direct"
-out=$(run direct); rc=$?
-eq "kvn direct при блокировке: rc=1" "$rc" 1
-has "kvn direct при блокировке: причина" "$out" "напрямую: нет доступа к KeenBOOT"
+has "athena 0.0.4: шапка с п.9" "$out" "KeenBOOT: Стас  Athena: п.9  Каналы:"
+out=$(run --check)
+has "athena 0.0.4: check" "$out" "Athena-патч: 0.0.4 (п.9 -> Athena, https://osvault.project-athens.com/files/athena)"
+export KEENKIT_VPN_ARCH=mipsel
+out=$(run)
+hasnt "mipsel: без п.9 в шапке" "$out" "Athena: п.9"
+out=$(run --check)
+has "mipsel: Athena недоступна" "$out" "mipsel: Athena недоступна"
+unset KEENKIT_VPN_ARCH
 teardown
-
 setup
-printf 'IFACES="nwg0 nwg1 nwg2"\nFW_LABEL="Афина"\n' >"$T/opt/etc/kvn.conf"
-out=$(run check)
-has "миграция старого значения по умолчанию" "$out" "IFACES «nwg0 nwg1 nwg2» -> «direct auto»"
-eq "миграция: конфиг обновлён" "$(cat "$T/opt/etc/kvn.conf")" "$(printf 'IFACES="direct auto"\nFW_LABEL="Афина"')"
-eq "миграция: права 600" "$(stat -c %a "$T/opt/etc/kvn.conf")" 600
-printf 'IFACES="nwg1 nwg0"\n' >"$T/opt/etc/kvn.conf"
-out=$(run check)
-hasnt "своё значение IFACES не трогается" "$out" "direct auto"
-eq "своё значение IFACES сохранено" "$(cat "$T/opt/etc/kvn.conf")" 'IFACES="nwg1 nwg0"'
+sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.3"\n    [ "$arch" != "aarch64" ] \|\| ota_path="/files/athena" # athena-patch|' "$T/opt/keenkit.sh"
+export KEENKIT_VPN_ARCH=aarch64
+out=$(run)
+has "athena 0.0.3: KeenBOOT Афина" "$out" "KeenBOOT: Афина"
+out=$(run --check)
+has "athena 0.0.3: предложение обновить" "$out" "Athena-патч: 0.0.3 (п.8 -> Athena; обнови: athena-patch)"
+unset KEENKIT_VPN_ARCH
 teardown
 
-echo "== переключение канала на лету (обёртка)"
+echo "== обёртка: переключение канала на лету"
 setup
 run >/dev/null
-W="$T/opt/lib/kvn/curl"
+W="$T/opt/lib/keenkit-vpn/curl"
 wrap() { KK_IFACES="$1" KK_STATE="$T/tmp/state" KK_REAL="$T/opt/bin/curl" $SH "$W" "$2" 2>"$T/err"; }
-mkdir -p "$T/tmp"
 : >"$T/curl.log"
 touch "$T/dead_nwg0"
 out=$(wrap "nwg0 nwg1" "https://x/body"); rc=$?
 eq "отказ nwg0 -> ответ через nwg1: rc=0" "$rc" 0
 eq "в выводе нет мусора от упавшей попытки" "$out" "BODY"
-has "сообщение о переключении" "$(cat "$T/err")" "kvn: nwg0 не отвечает (curl 56), повтор через следующий канал"
+has "сообщение о переключении" "$(cat "$T/err")" "keenkit-vpn: nwg0 не отвечает (curl 56), повтор через следующий канал"
 eq "попытки по порядку" "$(grep -o -- '--interface nwg[0-9]' "$T/curl.log" | tr '\n' ' ')" "--interface nwg0 --interface nwg1 "
 eq "запомнен удачный канал" "$(cat "$T/tmp/state")" "nwg1"
 : >"$T/curl.log"
@@ -252,44 +288,41 @@ rm -f "$T/dead_nwg0" "$T/dead_nwg1"
 : >"$T/curl.log"
 out=$(wrap "direct nwg0" "https://x/body")
 eq "direct: первая попытка без --interface" "$(head -n 1 "$T/curl.log")" "https://x/body"
-: >"$T/curl.log"
-rm -f "$T/tmp/state"
-out=$(wrap "direct nwg0" "https://x/body")
 has "direct заблокирован -> nwg0" "$(cat "$T/curl.log")" "--interface nwg0 https://x/body"
-has "подсказка для direct" "$(cat "$T/err")" "kvn: напрямую не отвечает"
+has "подсказка для direct" "$(cat "$T/err")" "keenkit-vpn: напрямую не отвечает"
+printf 'evil;rm\n' >"$T/tmp/state"
+: >"$T/curl.log"
+out=$(wrap "nwg0 nwg1" "https://x/body")
+has "чужое значение в файле состояния игнорируется" "$(head -n 1 "$T/curl.log")" "--interface nwg0"
 : >"$T/curl.log"
 out=$(KK_IFACES="nwg0" KK_REAL="$T/opt/bin/curl" $SH "$W" -s "http://127.0.0.1:79/rci/show/version")
 eq "RCI: без --interface и без повторов" "$(cat "$T/curl.log")" "-s http://127.0.0.1:79/rci/show/version"
-n=0; for f in "${TMPDIR:-/tmp}"/kvn-out.* "${TMPDIR:-/tmp}"/kvn-err.*; do [ -e "$f" ] && n=$((n + 1)); done
+: >"$T/curl.log"
+KK_REAL="$T/opt/bin/curl" $SH "$W" -fLs https://osvault.project-athens.com/files/keenboot/x >/dev/null
+eq "без KK_IFACES аргументы не меняются" "$(cat "$T/curl.log")" "-fLs https://osvault.project-athens.com/files/keenboot/x"
+n=0; for f in "${TMPDIR:-/tmp}"/keenkit-vpn-out.* "${TMPDIR:-/tmp}"/keenkit-vpn-err.*; do [ -e "$f" ] && n=$((n + 1)); done
 eq "временные файлы обёртки удалены" "$n" 0
 teardown
 
-echo "== обёртка без kvn"
+echo "== --vpn-remove"
 setup
 run >/dev/null
-: >"$T/curl.log"
-KK_REAL="$T/opt/bin/curl" $SH "$T/opt/lib/kvn/curl" -fLs https://osvault.project-athens.com/files/keenboot/x
-eq "без KK_IFACE аргументы не меняются" "$(cat "$T/curl.log")" "-fLs https://osvault.project-athens.com/files/keenboot/x"
-teardown
-
-echo "== прочее"
-setup
-eq "--version" "$(run -V)" "0.0.7"
-out=$(run --bad); rc=$?
-eq "неизвестный параметр -> rc=1" "$rc" 1
-out=$(echo n | run uninstall)
-[ -f "$T/opt/bin/kvn" ] && ok "uninstall: n ничего не удаляет" || bad "uninstall: n ничего не удаляет"
-run >/dev/null
-out=$(echo y | run uninstall)
-[ ! -e "$T/opt/bin/kvn" ] && [ ! -e "$T/opt/lib/kvn" ] && [ ! -e "$T/opt/etc/kvn.conf" ] &&
-  ok "uninstall: y удаляет всё" || bad "uninstall: y удаляет всё"
-[ -f "$T/opt/etc/KeenKit.conf" ] && ok "uninstall: KeenKit.conf сохранён" || bad "uninstall: KeenKit.conf сохранён"
+printf 'domain="x"\n' >"$T/opt/etc/KeenKit.conf"
+out=$(echo n | run --vpn-remove)
+[ -f "$T/opt/bin/keenkit" ] && [ ! -L "$T/opt/bin/keenkit" ] && ok "n: ничего не меняется" || bad "n: ничего не меняется"
+out=$(echo y | run --vpn-remove)
+[ -L "$T/opt/bin/keenkit" ] && ok "y: keenkit снова симлинк" || bad "y: keenkit снова симлинк"
+eq "y: симлинк на /opt/keenkit.sh" "$(readlink "$T/opt/bin/keenkit")" "/opt/keenkit.sh"
+[ ! -e "$T/opt/lib/keenkit-vpn" ] && [ ! -e "$T/opt/etc/keenkit-vpn.conf" ] && [ ! -e "$T/tmp/keenkit-vpn.iface" ] &&
+  ok "y: обёртка, настройки и состояние удалены" || bad "y: обёртка, настройки и состояние удалены"
+eq "y: KeenKit.conf сохранён" "$(cat "$T/opt/etc/KeenKit.conf")" 'domain="x"'
 teardown
 
 echo "== install.sh"
 inst_setup() {
   setup
-  rm -f "$T/opt/bin/kvn"
+  rm -f "$T/opt/bin/keenkit"
+  ln -s /opt/keenkit.sh "$T/opt/bin/keenkit"
   # curl для установщика: отдаёт файл из $T/src (режимы: ok, html, broken, fail)
   cat >"$T/opt/bin/curl" <<EOF
 #!/bin/sh
@@ -303,18 +336,20 @@ fail) exit 22 ;;
 esac
 EOF
   chmod +x "$T/opt/bin/curl"
-  cp "$KVN" "$T/src"
+  cp "$LAUNCHER" "$T/src"
 }
-inst() { KVN_ROOT="$T" $SH "$INSTALL" "$@" 2>&1; }
+inst() { KEENKIT_VPN_ROOT="$T" $SH "$INSTALL" "$@" 2>&1; }
 
 inst_setup; echo ok >"$T/mode"
 out=$(inst); rc=$?
 eq "установка: rc=0" "$rc" 0
-has "установка: сообщение" "$out" "kvn $(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$KVN") установлен"
-cmp -s "$T/opt/bin/kvn" "$KVN" && ok "установка: файл идентичен" || bad "установка: файл идентичен"
-[ -x "$T/opt/bin/kvn" ] && ok "установка: исполняемый" || bad "установка: исполняемый"
-hasnt "установка: без --interface по умолчанию" "$(cat "$T/curl.log")" "--interface"
-out=$(inst); has "повтор: обновление" "$out" "kvn обновлён:"
+has "установка: сообщение" "$out" "keenkit-vpn $VER установлен"
+[ -f "$T/opt/bin/keenkit" ] && [ ! -L "$T/opt/bin/keenkit" ] && ok "симлинк заменён лаунчером" || bad "симлинк заменён лаунчером"
+cmp -s "$T/opt/bin/keenkit" "$LAUNCHER" && ok "файл идентичен" || bad "файл идентичен"
+[ -x "$T/opt/bin/keenkit" ] && ok "исполняемый" || bad "исполняемый"
+[ -f "$T/opt/keenkit.sh" ] && ok "KeenKit не тронут" || bad "KeenKit не тронут"
+hasnt "без --interface по умолчанию" "$(cat "$T/curl.log")" "--interface"
+out=$(inst); has "повтор: обновление" "$out" "keenkit-vpn обновлён: $VER -> $VER"
 : >"$T/curl.log"; inst nwg0 >/dev/null
 has "через интерфейс" "$(cat "$T/curl.log")" "--interface nwg0"
 out=$(inst nwg9); rc=$?; eq "нет интерфейса: rc=1" "$rc" 1
@@ -322,20 +357,39 @@ out=$(inst 'nwg0;id'); rc=$?; eq "инъекция в интерфейс: rc=1" 
 teardown
 
 for mode in html broken fail; do
-  inst_setup; echo "$mode" >"$T/mode"; echo OLD >"$T/opt/bin/kvn"
+  inst_setup; echo "$mode" >"$T/mode"
   out=$(inst); rc=$?
   eq "$mode: rc=1" "$rc" 1
-  eq "$mode: старый kvn сохранён" "$(cat "$T/opt/bin/kvn")" OLD
+  [ -L "$T/opt/bin/keenkit" ] && ok "$mode: симлинк keenkit не тронут" || bad "$mode: симлинк keenkit не тронут"
   n=0; for f in "$T"/opt/bin/*.new.*; do [ -e "$f" ] && n=$((n + 1)); done
   eq "$mode: временных файлов нет" "$n" 0
   teardown
 done
 
 inst_setup; echo ok >"$T/mode"
-mkdir -p "$T/opt/lib/keenkit-vpn"; touch "$T/opt/bin/keenkit-vpn"; printf 'IFACES="nwg1"\n' >"$T/opt/etc/keenkit-vpn.conf"
+mkdir -p "$T/opt/lib/kvn"; touch "$T/opt/bin/kvn" "$T/opt/bin/keenkit-vpn"
+printf 'IFACES="nwg1"\n' >"$T/opt/etc/kvn.conf"
+printf 'IFACES="nwg0 nwg1 nwg2"\n' >"$T/opt/etc/keenkit-vpn.conf"
 inst >/dev/null
-eq "миграция конфига keenkit-vpn" "$(cat "$T/opt/etc/kvn.conf")" 'IFACES="nwg1"'
-[ ! -e "$T/opt/bin/keenkit-vpn" ] && [ ! -e "$T/opt/lib/keenkit-vpn" ] && ok "старые файлы удалены" || bad "старые файлы удалены"
+eq "переход с kvn: настройки kvn.conf" "$(cat "$T/opt/etc/keenkit-vpn.conf")" 'IFACES="nwg1"'
+[ ! -e "$T/opt/bin/kvn" ] && [ ! -e "$T/opt/lib/kvn" ] && [ ! -e "$T/opt/bin/keenkit-vpn" ] && [ ! -e "$T/opt/etc/kvn.conf" ] &&
+  ok "переход с kvn: старые файлы удалены" || bad "переход с kvn: старые файлы удалены"
+teardown
+
+inst_setup; echo ok >"$T/mode"
+rm -f "$T/opt/bin/keenkit"; echo "#!/bin/sh" >"$T/opt/bin/keenkit"; echo "echo foreign" >>"$T/opt/bin/keenkit"
+out=$(inst)
+has "чужой файл keenkit сохраняется" "$out" "сохранён: $T/opt/bin/keenkit.orig-"
+n=0; for f in "$T"/opt/bin/keenkit.orig-*; do [ -f "$f" ] && grep -q foreign "$f" && n=$((n + 1)); done
+eq "копия чужого файла" "$n" 1
+teardown
+
+inst_setup; echo ok >"$T/mode"
+rm -f "$T/opt/keenkit.sh"
+out=$(inst); rc=$?
+eq "без KeenKit: rc=1" "$rc" 1
+has "без KeenKit: причина" "$out" "KeenKit не установлен"
+[ -L "$T/opt/bin/keenkit" ] && ok "без KeenKit: ничего не изменено" || bad "без KeenKit: ничего не изменено"
 teardown
 
 echo

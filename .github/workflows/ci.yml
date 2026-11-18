@@ -12,10 +12,10 @@ jobs:
       - name: Install shells
         run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox dash shellcheck
       - name: ShellCheck
-        run: shellcheck kvn install.sh athena-patch.sh && shellcheck -s sh tests/run.sh tests/athena.sh
-      - name: kvn (busybox sh — как на роутере)
+        run: shellcheck keenkit install.sh athena-patch.sh && shellcheck -s sh tests/run.sh tests/athena.sh
+      - name: keenkit-vpn (busybox sh — как на роутере)
         run: TEST_SH="busybox sh" sh tests/run.sh
-      - name: kvn (dash)
+      - name: keenkit-vpn (dash)
         run: TEST_SH=dash sh tests/run.sh
       - name: Fetch KeenKit 2.9.5
         run: |
