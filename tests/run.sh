@@ -19,14 +19,24 @@ eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "ожидалось «$3�
 
 setup() {
   T=$(mktemp -d)
-  mkdir -p "$T/opt/bin" "$T/opt/etc" "$T/sys/class/net/nwg0" "$T/sys/class/net/nwg1" "$T/sys/class/net/eth0"
+  mkdir -p "$T/opt/bin" "$T/opt/etc" "$T/tmp" "$T/sys/class/net/nwg0" "$T/sys/class/net/nwg1" "$T/sys/class/net/eth0"
+  touch "$T/dead_direct"
   cp "$KVN" "$T/opt/bin/kvn"
-  # Поддельный curl: пишет аргументы в лог; $T/dead_<iface> — канал мёртв, $T/dead_fw — osvault недоступен
+  # Поддельный curl: пишет аргументы в лог; $T/dead_<iface> — канал мёртв (dead_direct — без туннеля),
+  # $T/dead_fw — osvault недоступен. По умолчанию провайдер блокирует (dead_direct)
   cat >"$T/opt/bin/curl" <<EOF
 #!/bin/sh
 echo "\$*" >>"$T/curl.log"
-case "\$*" in *"--interface nwg0"*) [ -f "$T/dead_nwg0" ] && exit 28 ;; esac
-case "\$*" in *"--interface nwg1"*) [ -f "$T/dead_nwg1" ] && exit 28 ;; esac
+case "\$*" in
+*"--interface "*)
+  i=\$(echo "\$*" | sed 's/.*--interface \([^ ]*\).*/\1/')
+  [ -f "$T/dead_\$i" ] && { printf PARTIAL; exit 56; }
+  ;;
+*127.0.0.1*) ;;
+*) [ -f "$T/dead_direct" ] && { printf PARTIAL; exit 7; } ;;
+esac
+case "\$*" in */404*) exit 22 ;; esac
+case "\$*" in */body*) echo BODY; exit 0 ;; esac
 case "\$*" in *osvault/*) [ -f "$T/dead_fw" ] && { case "\$*" in *http_code*) printf 000 ;; esac; exit 7; } ;; esac
 case "\$*" in *ipify*) echo 203.0.113.9; exit 0 ;; esac
 case "\$*" in *http_code*) printf 200 ;; esac
@@ -39,7 +49,7 @@ EOF
 SCRIPT_VERSION="2.9.2"
 # ota_path="/files/keenboot/\$arch"
 # printf 'domain="%s"\n' "\$domain" > "\$CONFIG_FILE"
-echo "KK IFACE=\$KK_IFACE"
+echo "KK IFACES=\$KK_IFACES"
 D=\$(sed -n 's/^domain="\(.*\)"\$/\1/p' "$T/opt/etc/KeenKit.conf")
 curl -s "http://127.0.0.1:79/rci/show/version"
 curl -fLs --basic "\$D/osvault"
@@ -56,8 +66,8 @@ echo "== запуск через nwg0"
 setup
 out=$(run)
 eq "код возврата 0" "$?" 0
-has "шапка" "$out" "Прошивки: Афина  KeenBOOT: Стас  Интерфейс: nwg0"
-has "KeenKit запущен через nwg0" "$out" "KK IFACE=nwg0"
+has "шапка" "$out" "Прошивки: Афина  KeenBOOT: Стас  Интерфейс: nwg0 (резерв: nwg1 напрямую)"
+has "KeenKit запущен через nwg0" "$out" "KK IFACES=nwg0 nwg1 direct"
 log=$(cat "$T/curl.log")
 has "RCI без --interface" "$log" "-s http://127.0.0.1:79/rci/show/version"
 hasnt "RCI не через туннель" "$log" "--interface nwg0 -s http://127.0.0.1"
@@ -176,6 +186,84 @@ out=$(run check)
 has "check: патч v1" "$out" "старый патч Athena v1"
 teardown
 
+echo "== каналы: direct, auto, миграция"
+setup
+rm -f "$T/dead_direct"
+out=$(run)
+has "провайдер не блокирует: напрямую, туннели в резерве" "$out" "Интерфейс: напрямую (резерв: nwg0 nwg1)"
+grep -qx -- '-fLs --basic https://osvault.project-athens.com/osvault' "$T/curl.log" && ok "напрямую: запрос без --interface" || bad "напрямую: запрос без --interface" "$(cat "$T/curl.log")"
+mkdir -p "$T/sys/class/net/wg5" "$T/sys/class/net/awg0" "$T/sys/class/net/nawg1" "$T/sys/class/net/mitun0"
+out=$(run check)
+has "auto: порядок wg/nwg -> awg/nawg -> mitun" "$out" "Порядок каналов: напрямую -> nwg0 -> nwg1 -> wg5 -> awg0 -> nawg1 -> mitun0"
+has "check: строка mitun0" "$out" "mitun0 (203.0.113.9)"
+out=$(run direct)
+has "kvn direct: без резерва" "$out" "Интерфейс: напрямую"
+hasnt "kvn direct: резерв не добавляется" "$out" "резерв"
+out=$(run nwg1)
+has "kvn nwg1: только nwg1" "$out" "Интерфейс: nwg1"
+hasnt "kvn nwg1: без резерва" "$out" "резерв"
+touch "$T/dead_direct"
+out=$(run direct); rc=$?
+eq "kvn direct при блокировке: rc=1" "$rc" 1
+has "kvn direct при блокировке: причина" "$out" "напрямую: нет доступа к KeenBOOT"
+teardown
+
+setup
+printf 'IFACES="nwg0 nwg1 nwg2"\nFW_LABEL="Афина"\n' >"$T/opt/etc/kvn.conf"
+out=$(run check)
+has "миграция старого значения по умолчанию" "$out" "IFACES «nwg0 nwg1 nwg2» -> «direct auto»"
+eq "миграция: конфиг обновлён" "$(cat "$T/opt/etc/kvn.conf")" "$(printf 'IFACES="direct auto"\nFW_LABEL="Афина"')"
+eq "миграция: права 600" "$(stat -c %a "$T/opt/etc/kvn.conf")" 600
+printf 'IFACES="nwg1 nwg0"\n' >"$T/opt/etc/kvn.conf"
+out=$(run check)
+hasnt "своё значение IFACES не трогается" "$out" "direct auto"
+eq "своё значение IFACES сохранено" "$(cat "$T/opt/etc/kvn.conf")" 'IFACES="nwg1 nwg0"'
+teardown
+
+echo "== переключение канала на лету (обёртка)"
+setup
+run >/dev/null
+W="$T/opt/lib/kvn/curl"
+wrap() { KK_IFACES="$1" KK_STATE="$T/tmp/state" KK_REAL="$T/opt/bin/curl" $SH "$W" "$2" 2>"$T/err"; }
+mkdir -p "$T/tmp"
+: >"$T/curl.log"
+touch "$T/dead_nwg0"
+out=$(wrap "nwg0 nwg1" "https://x/body"); rc=$?
+eq "отказ nwg0 -> ответ через nwg1: rc=0" "$rc" 0
+eq "в выводе нет мусора от упавшей попытки" "$out" "BODY"
+has "сообщение о переключении" "$(cat "$T/err")" "kvn: nwg0 не отвечает (curl 56), повтор через следующий канал"
+eq "попытки по порядку" "$(grep -o -- '--interface nwg[0-9]' "$T/curl.log" | tr '\n' ' ')" "--interface nwg0 --interface nwg1 "
+eq "запомнен удачный канал" "$(cat "$T/tmp/state")" "nwg1"
+: >"$T/curl.log"
+rm -f "$T/dead_nwg0"
+out=$(wrap "nwg0 nwg1" "https://x/body")
+has "следующий запрос сразу через запомненный канал" "$(head -n 1 "$T/curl.log")" "--interface nwg1"
+: >"$T/curl.log"
+out=$(wrap "nwg0 nwg1" "https://x/404"); rc=$?
+eq "ответ сервера (404): rc curl сохранён" "$rc" 22
+eq "ответ сервера: без повтора через другие каналы" "$(wc -l <"$T/curl.log" | tr -d ' ')" 1
+touch "$T/dead_nwg0" "$T/dead_nwg1"
+rm -f "$T/tmp/state"
+out=$(wrap "nwg0 nwg1" "https://x/body"); rc=$?
+eq "все каналы мертвы: rc последней попытки" "$rc" 56
+eq "все каналы мертвы: подсказка только между попытками" "$(grep -c 'повтор через следующий канал' "$T/err")" 1
+[ ! -e "$T/tmp/state" ] && ok "неудача не запоминается" || bad "неудача не запоминается"
+rm -f "$T/dead_nwg0" "$T/dead_nwg1"
+: >"$T/curl.log"
+out=$(wrap "direct nwg0" "https://x/body")
+eq "direct: первая попытка без --interface" "$(head -n 1 "$T/curl.log")" "https://x/body"
+: >"$T/curl.log"
+rm -f "$T/tmp/state"
+out=$(wrap "direct nwg0" "https://x/body")
+has "direct заблокирован -> nwg0" "$(cat "$T/curl.log")" "--interface nwg0 https://x/body"
+has "подсказка для direct" "$(cat "$T/err")" "kvn: напрямую не отвечает"
+: >"$T/curl.log"
+out=$(KK_IFACES="nwg0" KK_REAL="$T/opt/bin/curl" $SH "$W" -s "http://127.0.0.1:79/rci/show/version")
+eq "RCI: без --interface и без повторов" "$(cat "$T/curl.log")" "-s http://127.0.0.1:79/rci/show/version"
+n=0; for f in "${TMPDIR:-/tmp}"/kvn-out.* "${TMPDIR:-/tmp}"/kvn-err.*; do [ -e "$f" ] && n=$((n + 1)); done
+eq "временные файлы обёртки удалены" "$n" 0
+teardown
+
 echo "== обёртка без kvn"
 setup
 run >/dev/null
@@ -186,7 +274,7 @@ teardown
 
 echo "== прочее"
 setup
-eq "--version" "$(run -V)" "0.0.6"
+eq "--version" "$(run -V)" "0.0.7"
 out=$(run --bad); rc=$?
 eq "неизвестный параметр -> rc=1" "$rc" 1
 out=$(echo n | run uninstall)

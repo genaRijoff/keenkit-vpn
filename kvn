@@ -7,13 +7,16 @@
 # KeenKit не модифицируется: подменяется только curl через PATH (переживает обновления KeenKit).
 #
 # Использование:
-#   kvn              автовыбор рабочего интерфейса из IFACES и запуск KeenKit
-#   kvn nwg1         запуск через указанный интерфейс
+#   kvn              выбрать первый рабочий канал из IFACES и запустить KeenKit;
+#                    если канал упадёт во время работы — запрос повторится через следующий
+#   kvn nwg1         только указанный интерфейс (без резерва); kvn direct — напрямую
 #   kvn check        проверка каналов, источников и совместимости с KeenKit
 #   kvn uninstall    удалить kvn
 # Настройки: /opt/etc/kvn.conf (создаётся при первом запуске)
+#   IFACES — каналы по порядку: direct (без туннеля), имена интерфейсов,
+#            auto (все wg*/nwg*, затем awg*/nawg*, затем mitun*). По умолчанию: direct auto
 
-VERSION="0.0.6"
+VERSION="0.0.7"
 KK_TESTED="2.9.1 2.9.2 2.9.3 2.9.4 2.9.5"
 
 set -u
@@ -27,10 +30,12 @@ KK_SCRIPT="$ROOT/opt/keenkit.sh"
 KK_CONF="$ROOT/opt/etc/KeenKit.conf"
 REAL_CURL="$ROOT/opt/bin/curl"
 NET_DIR="$ROOT/sys/class/net"
+STATE_DIR="$ROOT/tmp"
 ARCH="${KVN_ARCH:-$(uname -m)}"
 
 # Значения по умолчанию (переопределяются в $CONF)
-IFACES="nwg0 nwg1 nwg2"
+IFACES="direct auto"
+OLD_DEFAULT_IFACES="nwg0 nwg1 nwg2" # значение по умолчанию до 0.0.7
 FW_DOMAIN="https://osvault.project-athens.com"
 FW_LABEL="Афина"
 KB_BASE="https://spatiumstas.github.io/KeenKit"
@@ -66,7 +71,8 @@ require() {
 write_default_conf() {
   mkdir -p "${CONF%/*}" || die "Не удалось создать ${CONF%/*}"
   cat >"$CONF" <<EOF
-# kvn: интерфейсы проверяются по порядку, используется первый рабочий
+# kvn: каналы по порядку, используется первый рабочий, остальные — резерв.
+# direct — без туннеля; auto — все wg*/nwg*, awg*/nawg*, mitun*; или имена через пробел
 IFACES="$IFACES"
 # п.5 OTA Update — прошивки
 FW_DOMAIN="$FW_DOMAIN"
@@ -124,6 +130,23 @@ load_conf() {
   for i in $IFACES; do
     valid_iface_name "$i" || die "IFACES: недопустимое имя интерфейса «$i»"
   done
+  migrate_conf
+}
+
+# Конфиг со старым значением по умолчанию переводится на новое (direct auto).
+# Значение, изменённое вручную, не трогается.
+migrate_conf() {
+  [ "$IFACES" = "$OLD_DEFAULT_IFACES" ] || return 0
+  grep -qx "IFACES=\"$OLD_DEFAULT_IFACES\"" "$CONF" || return 0
+  TMP_FILE="$CONF.$$"
+  if sed "s/^IFACES=\"$OLD_DEFAULT_IFACES\"\$/IFACES=\"direct auto\"/" "$CONF" >"$TMP_FILE" &&
+    chmod 600 "$TMP_FILE" && mv -f "$TMP_FILE" "$CONF"; then
+    IFACES="direct auto"
+    msg "kvn.conf: IFACES «$OLD_DEFAULT_IFACES» -> «direct auto» (напрямую, затем все туннели)"
+  else
+    warn "Не удалось обновить $CONF, оставляю IFACES=\"$IFACES\""
+  fi
+  TMP_FILE=""
 }
 
 # Реальный источник п.8: athena-patch на aarch64 переводит KeenBOOT на Athena (FW_DOMAIN/files/athena).
@@ -156,24 +179,59 @@ fetch() {
   "$REAL_CURL" -fsS --connect-timeout 4 -m 10 "$@"
 }
 
+iface_label() {
+  if [ "$1" = "direct" ]; then echo "напрямую"; else echo "$1"; fi
+}
+
+# Список каналов из IFACES: direct, существующие интерфейсы, auto -> wg*/nwg*, awg*/nawg*, mitun*.
+# Порядок сохраняется, повторы и отсутствующие интерфейсы отбрасываются.
+expand_ifaces() {
+  local out="" i f n fam
+  for i in $IFACES; do
+    case "$i" in
+    auto)
+      for fam in wg awg mitun; do
+        for f in "$NET_DIR"/*; do
+          [ -d "$f" ] || continue
+          n=${f##*/}
+          case "$fam:$n" in
+          wg:wg* | wg:nwg* | awg:awg* | awg:nawg* | mitun:mitun*) ;;
+          *) continue ;;
+          esac
+          case " $out " in *" $n "*) ;; *) out="$out $n" ;; esac
+        done
+      done
+      ;;
+    direct)
+      case " $out " in *" direct "*) ;; *) out="$out direct" ;; esac
+      ;;
+    *)
+      iface_exists "$i" || continue
+      case " $out " in *" $i "*) ;; *) out="$out $i" ;; esac
+      ;;
+    esac
+  done
+  echo "${out# }"
+}
+
 # Канал рабочий, если через него доступны оба источника. Печатает причину отказа.
 probe_iface() {
   local iface="$1"
-  if ! fetch --interface "$iface" -o /dev/null "$KB_URL/" >/dev/null 2>&1; then
-    warn "$iface: нет доступа к KeenBOOT ($KB_NAME)"
+  if [ "$iface" = "direct" ]; then set --; else set -- --interface "$iface"; fi
+  if ! fetch "$@" -o /dev/null "$KB_URL/" >/dev/null 2>&1; then
+    warn "$(iface_label "$iface"): нет доступа к KeenBOOT ($KB_NAME)"
     return 1
   fi
-  if ! fetch --interface "$iface" -o /dev/null "$FW_DOMAIN/osvault/" >/dev/null 2>&1; then
-    warn "$iface: нет доступа к прошивкам ($FW_LABEL)"
+  if ! fetch "$@" -o /dev/null "$FW_DOMAIN/osvault/" >/dev/null 2>&1; then
+    warn "$(iface_label "$iface"): нет доступа к прошивкам ($FW_LABEL)"
     return 1
   fi
 }
 
-# Первый рабочий интерфейс из IFACES; отсутствующие пропускаются молча.
+# Первый рабочий канал из списка $1.
 pick_iface() {
   local i
-  for i in $IFACES; do
-    iface_exists "$i" || continue
+  for i in $1; do
     if probe_iface "$i"; then
       echo "$i"
       return 0
@@ -193,10 +251,13 @@ wrapper_body() {
   cat <<'WRAP'
 #!/bin/sh
 # Сгенерировано kvn, изменения будут перезаписаны.
-# Внешние запросы -> через $KK_IFACE; $KK_FW/files/keenboot/* -> $KK_KB/files/keenboot/*;
-# локальный RCI (127.0.0.1/localhost) -> напрямую.
+# Внешние запросы идут через каналы $KK_IFACES по порядку (direct = без --interface), начиная
+# с последнего удачного ($KK_STATE). Сетевая ошибка -> повтор через следующий канал; ответ
+# сервера (404 и т.п.) не повторяется. $KK_FW/files/keenboot/* -> $KK_KB/files/keenboot/*.
+# Локальный RCI (127.0.0.1/localhost) — напрямую.
 REAL="${KK_REAL:-/opt/bin/curl}"
-[ -n "${KK_IFACE:-}" ] || exec "$REAL" "$@"
+ifaces="${KK_IFACES:-${KK_IFACE:-}}"
+[ -n "$ifaces" ] || exec "$REAL" "$@"
 local_call=0
 n=$#
 for arg do
@@ -212,7 +273,50 @@ for arg do
 done
 shift "$n"
 [ "$local_call" = 1 ] && exec "$REAL" "$@"
-exec "$REAL" --interface "$KK_IFACE" "$@"
+
+state="${KK_STATE:-}"
+if [ -n "$state" ] && [ -r "$state" ] && read -r last <"$state"; then
+  case " $ifaces " in
+  *" $last "*)
+    rest=""
+    for i in $ifaces; do [ "$i" = "$last" ] || rest="$rest $i"; done
+    ifaces="$last$rest"
+    ;;
+  esac
+fi
+
+out=$(mktemp "${TMPDIR:-/tmp}/kvn-out.XXXXXX") || exit 1
+err=$(mktemp "${TMPDIR:-/tmp}/kvn-err.XXXXXX") || { rm -f "$out"; exit 1; }
+trap 'rm -f "$out" "$err"' EXIT
+trap 'exit 130' INT TERM
+
+rc=1
+left=$(echo "$ifaces" | wc -w)
+for i in $ifaces; do
+  left=$((left - 1))
+  if [ "$i" = "direct" ]; then
+    "$REAL" "$@" >"$out" 2>"$err"
+  else
+    "$REAL" --interface "$i" "$@" >"$out" 2>"$err"
+  fi
+  rc=$?
+  case "$rc" in
+  5 | 6 | 7 | 16 | 28 | 35 | 52 | 55 | 56)
+    if [ "$left" -gt 0 ]; then
+      [ "$i" = "direct" ] && i="напрямую"
+      printf 'kvn: %s не отвечает (curl %s), повтор через следующий канал\n' "$i" "$rc" >&2
+      continue
+    fi
+    ;;
+  esac
+  break
+done
+if [ "$rc" -eq 0 ] && [ -n "$state" ]; then
+  printf '%s\n' "$i" >"$state" 2>/dev/null || true
+fi
+cat "$out"
+cat "$err" >&2
+exit "$rc"
 WRAP
 }
 
@@ -256,7 +360,7 @@ set_kk_domain() {
 # ---------- команды ----------
 
 cmd_run() {
-  local iface
+  local iface cands reserve failed seen i labels
   [ -x "$REAL_CURL" ] || die "Нет $REAL_CURL (opkg install curl)"
   [ -f "$KK_SCRIPT" ] || die "KeenKit не установлен ($KK_SCRIPT)"
   if kk_athena_v1; then
@@ -265,10 +369,27 @@ cmd_run() {
     warn "KeenKit $(kk_version): структура OTA изменилась, KeenBOOT может пойти не через $KB_NAME"
   fi
   if [ -n "$1" ]; then
-    iface_exists "$1" || die "Интерфейс $1 не найден. Есть: $(list_ifaces)"
-    IFACES="$1"
+    [ "$1" = "direct" ] || iface_exists "$1" || die "Интерфейс $1 не найден. Есть: $(list_ifaces)"
+    cands="$1"
+  else
+    cands=$(expand_ifaces)
+    [ -n "$cands" ] || die "Ни одного канала из IFACES=\"$IFACES\" нет на роутере. Есть: $(list_ifaces)"
   fi
-  iface=$(pick_iface) || die "Нет рабочего интерфейса ($IFACES). Проверка: kvn check"
+  iface=$(pick_iface "$cands") || die "Нет рабочего канала ($cands). Проверка: kvn check"
+  # Резерв: сначала каналы после выбранного, в конце — не прошедшие проверку при запуске
+  reserve="" failed="" seen=0
+  for i in $cands; do
+    if [ "$i" = "$iface" ]; then
+      seen=1
+    elif [ "$seen" = 1 ]; then
+      reserve="$reserve $i"
+    else
+      failed="$failed $i"
+    fi
+  done
+  reserve=${reserve# }
+  failed=${failed# }
+  reserve="$reserve${failed:+${reserve:+ }$failed}"
   install_wrapper
   set_kk_domain
   printf '%bПрошивки:%b %b%s%b  %bKeenBOOT:%b %b%s%b' \
@@ -277,8 +398,16 @@ cmd_run() {
   if athena_menu9 && [ "$ARCH" = "aarch64" ]; then
     printf '  %bAthena:%b %bп.9%b' "$CYAN" "$NC" "$GREEN" "$NC"
   fi
-  printf '  %bИнтерфейс:%b %b%s%b\n' "$CYAN" "$NC" "$GREEN" "$iface" "$NC"
-  KK_IFACE="$iface" KK_FW="$FW_DOMAIN" KK_KB="$KB_BASE" KK_REAL="$REAL_CURL" \
+  printf '  %bИнтерфейс:%b %b%s%b' "$CYAN" "$NC" "$GREEN" "$(iface_label "$iface")" "$NC"
+  if [ -n "$reserve" ]; then
+    labels=""
+    for i in $reserve; do labels="$labels $(iface_label "$i")"; done
+    printf ' (резерв:%s)' "$labels"
+  fi
+  printf '\n'
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  KK_IFACES="$iface${reserve:+ $reserve}" KK_STATE="$STATE_DIR/kvn-iface.$$" \
+    KK_FW="$FW_DOMAIN" KK_KB="$KB_BASE" KK_REAL="$REAL_CURL" \
     PATH="${WRAP%/*}:$PATH" exec sh "$KK_SCRIPT"
 }
 
@@ -308,7 +437,7 @@ check_row() {
 
 cmd_check() {
   [ -x "$REAL_CURL" ] || die "Нет $REAL_CURL"
-  local v d i a
+  local v d i a cands labels
   printf '%bkvn %s%b\n' "$CYAN" "$VERSION" "$NC"
   printf 'Прошивки (%s): %s\n' "$FW_LABEL" "$FW_DOMAIN"
   printf 'KeenBOOT (%s): %s\n' "$KB_NAME" "$KB_URL"
@@ -345,10 +474,14 @@ cmd_check() {
     printf 'KeenKit.conf: %b%s%b (исправится при запуске kvn)\n' "$YELLOW" "${d:-не задан}" "$NC"
   fi
 
+  cands=$(expand_ifaces)
+  labels=""
+  for i in $cands; do labels="$labels -> $(iface_label "$i")"; done
+  printf 'Порядок каналов: %s\n' "${labels# -> }"
   printf '\n'
   check_row "напрямую"
-  for i in $IFACES; do
-    if iface_exists "$i"; then check_row "$i" --interface "$i"; fi
+  for i in $cands; do
+    [ "$i" = "direct" ] || check_row "$i" --interface "$i"
   done
 }
 
@@ -368,7 +501,7 @@ cmd_uninstall() {
 require sed grep head cat mkdir chmod mv rm uname
 
 case "${1:-}" in
--h | --help) sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+-h | --help) sed -n '3,/^$/p' "$0" | sed 's/^# \{0,1\}//' ;;
 -V | --version) echo "$VERSION" ;;
 check) load_conf && resolve_kb_source && cmd_check ;;
 uninstall) cmd_uninstall ;;
