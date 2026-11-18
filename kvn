@@ -2,7 +2,7 @@
 # shellcheck shell=dash  # целевой shell — BusyBox ash (как dash: POSIX + local)
 # kvn (KeenVPN) — запуск KeenKit через VPN-интерфейс с раздельными OTA-источниками:
 #   п.5 OTA Update (прошивки) -> FW_DOMAIN (Афина)
-#   п.8 KeenBOOT OTA Update    -> KB_BASE   (Стас)
+#   п.8 KeenBOOT OTA Update    -> KB_BASE   (Стас); с athena-patch на aarch64 — Athena
 # KeenKit не модифицируется: подменяется только curl через PATH (переживает обновления KeenKit).
 #
 # Использование:
@@ -12,8 +12,8 @@
 #   kvn uninstall    удалить kvn
 # Настройки: /opt/etc/kvn.conf (создаётся при первом запуске)
 
-VERSION="0.0.4"
-KK_TESTED="2.9.1 2.9.2"
+VERSION="0.0.5"
+KK_TESTED="2.9.1 2.9.2 2.9.3 2.9.4 2.9.5"
 
 set -u
 
@@ -26,6 +26,7 @@ KK_SCRIPT="$ROOT/opt/keenkit.sh"
 KK_CONF="$ROOT/opt/etc/KeenKit.conf"
 REAL_CURL="$ROOT/opt/bin/curl"
 NET_DIR="$ROOT/sys/class/net"
+ARCH="${KVN_ARCH:-$(uname -m)}"
 
 # Значения по умолчанию (переопределяются в $CONF)
 IFACES="nwg0 nwg1 nwg2"
@@ -124,6 +125,21 @@ load_conf() {
   done
 }
 
+# Реальный источник п.8: athena-patch на aarch64 переводит KeenBOOT на Athena (FW_DOMAIN/files/athena).
+athena_patch_version() {
+  sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/p' "$KK_SCRIPT" 2>/dev/null | head -n 1
+}
+
+resolve_kb_source() {
+  if [ -n "$(athena_patch_version)" ] && [ "$ARCH" = "aarch64" ]; then
+    KB_URL="$FW_DOMAIN/files/athena"
+    KB_NAME="$FW_LABEL"
+  else
+    KB_URL="$KB_BASE"
+    KB_NAME="$KB_LABEL"
+  fi
+}
+
 # ---------- сеть ----------
 
 fetch() {
@@ -133,8 +149,8 @@ fetch() {
 # Канал рабочий, если через него доступны оба источника. Печатает причину отказа.
 probe_iface() {
   local iface="$1"
-  if ! fetch --interface "$iface" -o /dev/null "$KB_BASE/" >/dev/null 2>&1; then
-    warn "$iface: нет доступа к KeenBOOT ($KB_LABEL)"
+  if ! fetch --interface "$iface" -o /dev/null "$KB_URL/" >/dev/null 2>&1; then
+    warn "$iface: нет доступа к KeenBOOT ($KB_NAME)"
     return 1
   fi
   if ! fetch --interface "$iface" -o /dev/null "$FW_DOMAIN/osvault/" >/dev/null 2>&1; then
@@ -211,6 +227,11 @@ kk_compatible() {
     grep -qF "printf 'domain=\"%s\"" "$KK_SCRIPT" 2>/dev/null
 }
 
+# Патч v1 (без метки) заменял строку ota_path целиком
+kk_athena_v1() {
+  grep -q 'ota_path="/files/athena"' "$KK_SCRIPT" 2>/dev/null && [ -z "$(athena_patch_version)" ]
+}
+
 kk_domain() {
   sed -n 's/^domain="\(.*\)"$/\1/p' "$KK_CONF" 2>/dev/null | head -n 1
 }
@@ -228,7 +249,11 @@ cmd_run() {
   local iface
   [ -x "$REAL_CURL" ] || die "Нет $REAL_CURL (opkg install curl)"
   [ -f "$KK_SCRIPT" ] || die "KeenKit не установлен ($KK_SCRIPT)"
-  kk_compatible || warn "KeenKit $(kk_version): структура OTA изменилась, KeenBOOT может пойти не через $KB_LABEL"
+  if kk_athena_v1; then
+    warn "KeenKit изменён старым патчем Athena v1 — обнови: sh athena-patch.sh"
+  elif ! kk_compatible; then
+    warn "KeenKit $(kk_version): структура OTA изменилась, KeenBOOT может пойти не через $KB_NAME"
+  fi
   if [ -n "$1" ]; then
     iface_exists "$1" || die "Интерфейс $1 не найден. Есть: $(list_ifaces)"
     IFACES="$1"
@@ -238,7 +263,7 @@ cmd_run() {
   set_kk_domain
   printf '%bПрошивки:%b %b%s%b  %bKeenBOOT:%b %b%s%b  %bИнтерфейс:%b %b%s%b\n' \
     "$CYAN" "$NC" "$GREEN" "$FW_LABEL" "$NC" \
-    "$CYAN" "$NC" "$GREEN" "$KB_LABEL" "$NC" \
+    "$CYAN" "$NC" "$GREEN" "$KB_NAME" "$NC" \
     "$CYAN" "$NC" "$GREEN" "$iface" "$NC"
   KK_IFACE="$iface" KK_FW="$FW_DOMAIN" KK_KB="$KB_BASE" KK_REAL="$REAL_CURL" \
     PATH="${WRAP%/*}:$PATH" exec sh "$KK_SCRIPT"
@@ -262,7 +287,7 @@ check_row() {
   shift
   ip=$(fetch "$@" https://api.ipify.org 2>/dev/null) || ip="нет связи"
   printf '%s (%s): KeenBOOT ' "$name" "$ip"
-  status "$(http_code "$@" "$KB_BASE/")"
+  status "$(http_code "$@" "$KB_URL/")"
   printf ', прошивки '
   status "$(http_code "$@" "$FW_DOMAIN/osvault/")"
   printf '\n'
@@ -270,14 +295,16 @@ check_row() {
 
 cmd_check() {
   [ -x "$REAL_CURL" ] || die "Нет $REAL_CURL"
-  local v d i
+  local v d i a
   printf '%bkvn %s%b\n' "$CYAN" "$VERSION" "$NC"
   printf 'Прошивки (%s): %s\n' "$FW_LABEL" "$FW_DOMAIN"
-  printf 'KeenBOOT (%s): %s\n' "$KB_LABEL" "$KB_BASE"
+  printf 'KeenBOOT (%s): %s\n' "$KB_NAME" "$KB_URL"
 
   v=$(kk_version)
   if [ ! -f "$KK_SCRIPT" ]; then
     printf 'KeenKit: %bне установлен%b\n' "$RED" "$NC"
+  elif kk_athena_v1; then
+    printf 'KeenKit: %b%s — старый патч Athena v1, обнови: sh athena-patch.sh%b\n' "$YELLOW" "$v" "$NC"
   elif ! kk_compatible; then
     printf 'KeenKit: %b%s — структура OTA изменилась, нужна проверка kvn%b\n' "$RED" "$v" "$NC"
   else
@@ -285,6 +312,15 @@ cmd_check() {
     *" $v "*) printf 'KeenKit: %b%s OK%b\n' "$GREEN" "$v" "$NC" ;;
     *) printf 'KeenKit: %b%s (не проверялся, проверены: %s)%b\n' "$YELLOW" "$v" "$KK_TESTED" "$NC" ;;
     esac
+  fi
+
+  a=$(athena_patch_version)
+  if [ -n "$a" ]; then
+    if [ "$ARCH" = "aarch64" ]; then
+      printf 'Athena-патч: %s (п.8 -> Athena)\n' "$a"
+    else
+      printf 'Athena-патч: %s (%s: п.8 без изменений)\n' "$a" "$ARCH"
+    fi
   fi
 
   d=$(kk_domain)
@@ -314,14 +350,14 @@ cmd_uninstall() {
   esac
 }
 
-require sed grep head cat mkdir chmod mv rm
+require sed grep head cat mkdir chmod mv rm uname
 
 case "${1:-}" in
 -h | --help) sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//' ;;
 -V | --version) echo "$VERSION" ;;
-check) load_conf && cmd_check ;;
+check) load_conf && resolve_kb_source && cmd_check ;;
 uninstall) cmd_uninstall ;;
-"") load_conf && cmd_run "" ;;
+"") load_conf && resolve_kb_source && cmd_run "" ;;
 -*) die "Неизвестный параметр: $1 (kvn --help)" ;;
-*) load_conf && cmd_run "$1" ;;
+*) load_conf && resolve_kb_source && cmd_run "$1" ;;
 esac

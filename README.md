@@ -5,7 +5,7 @@
 | Пункт KeenKit | Источник |
 |---|---|
 | 5. OTA Update (прошивки) | `https://osvault.project-athens.com` (Афина) |
-| 8. KeenBOOT OTA Update | `https://spatiumstas.github.io/KeenKit` (Стас) |
+| 8. KeenBOOT OTA Update | `https://spatiumstas.github.io/KeenKit` (Стас); с [athena-patch](#athena-patch) на aarch64 — `https://osvault.project-athens.com/files/athena` (Афина) |
 
 KeenKit не модифицируется: kvn кладёт перед ним в `PATH` обёртку `curl`, которая
 - добавляет `--interface <VPN>` ко всем внешним запросам;
@@ -40,10 +40,11 @@ kvn uninstall    удаление (с подтверждением)
 Пример `kvn check`:
 
 ```
-kvn 0.0.4
+kvn 0.0.5
 Прошивки (Афина): https://osvault.project-athens.com
-KeenBOOT (Стас): https://spatiumstas.github.io/KeenKit
-KeenKit: 2.9.2 OK
+KeenBOOT (Афина): https://osvault.project-athens.com/files/athena
+KeenKit: 2.9.5 OK
+Athena-патч: 0.0.2 (п.8 -> Athena)
 KeenKit.conf: OK
 
 напрямую (x.x.x.x): KeenBOOT OK, прошивки OK
@@ -71,16 +72,50 @@ nwg0 (y.y.y.y): KeenBOOT OK, прошивки OK
 
 ## Совместимость
 
-kvn опирается на внутренности KeenKit: `ota_path="/files/keenboot/..."` и формат `KeenKit.conf`. `kvn check` проверяет оба маркера. Проверенные версии KeenKit: 2.9.1, 2.9.2.
+kvn опирается на внутренности KeenKit: `ota_path="/files/keenboot/..."` и формат `KeenKit.conf`. `kvn check` проверяет оба маркера. Проверенные версии KeenKit: 2.9.1–2.9.5.
 
 Ограничение: DNS резолвится через роутер, а не через туннель.
+
+## athena-patch
+
+Патч KeenKit: п.8 «KeenBOOT OTA Update» ставит загрузчик [Athena](https://project-athens.com/ru/wiki/helpful/athena) (Project Athens) на роутерах MT7981 (aarch64). Проверено на Cudy TR3000: Athena r41 записана через `keenboot_writer` с побайтной проверкой, роутер загружается.
+
+Что меняется (только в `/opt/keenkit.sh`, оригинал сохраняется):
+
+| | |
+|---|---|
+| п.8 на aarch64 | каталог `/files/athena` вместо `/files/keenboot/aarch64`; mipsel и п.5 — без изменений |
+| Вложенная папка | единственная подпапка модели открывается автоматически (`Cudy_TR3000/r41/`); при нескольких — нет |
+| Защита модели | папка не совпадает с моделью роутера → запись только после ввода `YES` |
+| Шапка | `Загрузчик: Athena r41 (2.14.0)` вместо `U-Boot phase` |
+
+Установка (если GitHub заблокирован — добавить `--interface nwg0`):
+
+```sh
+curl -fsSL -o /opt/bin/athena-patch https://raw.githubusercontent.com/genaRijoff/keenkit-vpn/main/athena-patch.sh
+chmod 755 /opt/bin/athena-patch
+athena-patch status    # состояние
+athena-patch diff      # что изменится, ничего не меняя
+athena-patch           # применить
+athena-patch revert    # вернуть оригинал
+```
+
+- Изменения вставляются после строк-якорей; каждый якорь должен встретиться ровно один раз, иначе KeenKit не трогается.
+- Оригинал сохраняется как `/opt/keenkit.sh.<версия>.orig`; замена атомарная (работающий KeenKit не ломается).
+- Патч v1 (`patch-athena.sh`, без метки) обновляется автоматически: оригинал берётся из `/opt/bin/keenkit.before-athena`.
+- После «99. Обновить скрипт» в KeenKit патч нужно применить заново (`kvn check` покажет, применён ли он).
+
+⚠️ Загрузчик — опасная процедура: только файл своей модели, стабильное питание, UART на случай отказа. «Не обновляйте загрузчик, если всё работает» (wiki Athena).
 
 ## Разработка
 
 ```sh
-shellcheck kvn install.sh && shellcheck -s sh tests/run.sh
-TEST_SH="busybox sh" sh tests/run.sh   # как на роутере
+shellcheck kvn install.sh athena-patch.sh && shellcheck -s sh tests/run.sh tests/athena.sh
+TEST_SH="busybox sh" sh tests/run.sh   # kvn, как на роутере
 TEST_SH=dash sh tests/run.sh
+KEENKIT_SRC=/путь/keenkit.sh V1_PATCH=tests/fixtures/patch-athena-v1.sh busybox sh tests/athena.sh
 ```
+
+`tests/athena.sh` работает на настоящем KeenKit (в CI скачивается по закреплённому коммиту с проверкой SHA-256): установка, откат, миграция с v1, а также функциональные прогоны пропатченного `ota_update` с заглушками сети — п.8 aarch64/mipsel, п.5, защита модели, вложенные папки, сравнение с оригиналом.
 
 Тесты работают в изолированном корне (`KVN_ROOT`) с поддельными `curl`, `/sys/class/net` и KeenKit. CI — `.github/workflows/ci.yml`.

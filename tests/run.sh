@@ -132,6 +132,32 @@ has "check: строка канала" "$out" "nwg0 (203.0.113.9): KeenBOOT"
 hasnt "check: eth0 не в IFACES" "$out" "eth0 ("
 teardown
 
+echo "== athena-patch"
+setup
+sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.2"|' "$T/opt/keenkit.sh"
+export KVN_ARCH=aarch64
+out=$(run)
+has "aarch64 + патч: шапка KeenBOOT Афина" "$out" "KeenBOOT: Афина"
+has "aarch64 + патч: проверка канала по /files/athena" "$(cat "$T/curl.log")" "--interface nwg0 -o /dev/null https://osvault.project-athens.com/files/athena/"
+hasnt "aarch64 + патч: Pages не проверяется" "$(grep -- '-o /dev/null' "$T/curl.log")" "spatiumstas.github.io"
+out=$(run check)
+has "check: строка патча" "$out" "Athena-патч: 0.0.2 (п.8 -> Athena)"
+has "check: источник KeenBOOT" "$out" "KeenBOOT (Афина): https://osvault.project-athens.com/files/athena"
+export KVN_ARCH=mipsel
+out=$(run)
+has "mipsel + патч: KeenBOOT Стас" "$out" "KeenBOOT: Стас"
+out=$(run check)
+has "mipsel + патч: п.8 без изменений" "$out" "mipsel: п.8 без изменений"
+unset KVN_ARCH
+teardown
+setup
+sed -i 's|^# ota_path=.*|    ota_path="/files/athena"|' "$T/opt/keenkit.sh"
+out=$(run)
+has "патч v1: предупреждение" "$out" "старым патчем Athena v1"
+out=$(run check)
+has "check: патч v1" "$out" "старый патч Athena v1"
+teardown
+
 echo "== обёртка без kvn"
 setup
 run >/dev/null
@@ -142,7 +168,7 @@ teardown
 
 echo "== прочее"
 setup
-eq "--version" "$(run -V)" "0.0.4"
+eq "--version" "$(run -V)" "0.0.5"
 out=$(run --bad); rc=$?
 eq "неизвестный параметр -> rc=1" "$rc" 1
 out=$(echo n | run uninstall)

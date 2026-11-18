@@ -1,5 +1,9 @@
 name: CI
 on: [push, pull_request]
+env:
+  # KeenKit не хранится в репозитории (лицензия «All Rights Reserved») — скачивается по закреплённому коммиту
+  KEENKIT_COMMIT: c9cd6b66327b03afebabfd15541fdd7337722311  # 2.9.5
+  KEENKIT_SHA256: 6e96bbcf0d2df11d0e4212f5e3ba1660549c8056c8e8008b09a6cf409e075ada
 jobs:
   test:
     runs-on: ubuntu-24.04
@@ -8,8 +12,14 @@ jobs:
       - name: Install shells
         run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox dash shellcheck
       - name: ShellCheck
-        run: shellcheck kvn install.sh && shellcheck -s sh tests/run.sh
-      - name: Tests (busybox sh — как на роутере)
+        run: shellcheck kvn install.sh athena-patch.sh && shellcheck -s sh tests/run.sh tests/athena.sh
+      - name: kvn (busybox sh — как на роутере)
         run: TEST_SH="busybox sh" sh tests/run.sh
-      - name: Tests (dash)
+      - name: kvn (dash)
         run: TEST_SH=dash sh tests/run.sh
+      - name: Fetch KeenKit 2.9.5
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/keenkit.sh" "https://raw.githubusercontent.com/spatiumstas/KeenKit/$KEENKIT_COMMIT/keenkit.sh"
+          echo "$KEENKIT_SHA256  $RUNNER_TEMP/keenkit.sh" | sha256sum -c -
+      - name: athena-patch (busybox sh)
+        run: KEENKIT_SRC="$RUNNER_TEMP/keenkit.sh" V1_PATCH=tests/fixtures/patch-athena-v1.sh busybox sh tests/athena.sh
