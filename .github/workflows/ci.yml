@@ -22,4 +22,4 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/keenkit.sh" "https://raw.githubusercontent.com/spatiumstas/KeenKit/$KEENKIT_COMMIT/keenkit.sh"
           echo "$KEENKIT_SHA256  $RUNNER_TEMP/keenkit.sh" | sha256sum -c -
       - name: athena-patch (busybox sh)
-        run: KEENKIT_SRC="$RUNNER_TEMP/keenkit.sh" V1_PATCH=tests/fixtures/patch-athena-v1.sh busybox sh tests/athena.sh
+        run: KEENKIT_SRC="$RUNNER_TEMP/keenkit.sh" busybox sh tests/athena.sh

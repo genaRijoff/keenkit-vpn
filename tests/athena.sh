@@ -2,6 +2,7 @@
 # shellcheck disable=SC2015,SC2016  # ok/bad всегда возвращают 0; литералы $... в фикстурах намеренно
 # Тесты athena-patch на реальном KeenKit (оригинал не хранится в репозитории — лицензия KeenKit).
 # Запуск: KEENKIT_SRC=/путь/к/keenkit.sh busybox sh tests/athena.sh
+# Миграция с патча v1 проверяется при V1_PATCH=/путь/patch-athena.sh (в репозитории его нет).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 PATCH=${PATCH:-$HERE/../athena-patch.sh}

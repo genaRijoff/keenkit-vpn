@@ -1,5 +1,7 @@
 # keenkit-vpn — `kvn` (KeenVPN)
 
+> ⚠️ **Неофициальный проект.** Не связан с [KeenKit](https://github.com/spatiumstas/KeenKit) (spatiumstas) и [Project Athens](https://project-athens.com). `kvn` и `athena-patch` меняют поведение KeenKit на вашем роутере; сам KeenKit здесь не распространяется. С проблемами, вызванными этими скриптами, не обращайтесь к авторам KeenKit и Athena. Всё — на ваш риск.
+
 Запуск [KeenKit](https://github.com/spatiumstas/KeenKit) через VPN-интерфейс Keenetic с раздельными OTA-источниками:
 
 | Пункт KeenKit | Источник |
@@ -113,7 +115,8 @@ athena-patch revert    # вернуть оригинал
 shellcheck kvn install.sh athena-patch.sh && shellcheck -s sh tests/run.sh tests/athena.sh
 TEST_SH="busybox sh" sh tests/run.sh   # kvn, как на роутере
 TEST_SH=dash sh tests/run.sh
-KEENKIT_SRC=/путь/keenkit.sh V1_PATCH=tests/fixtures/patch-athena-v1.sh busybox sh tests/athena.sh
+KEENKIT_SRC=/путь/keenkit.sh busybox sh tests/athena.sh
+# миграция с патча v1 проверяется, если указать путь к нему: V1_PATCH=/путь/patch-athena.sh
 ```
 
 `tests/athena.sh` работает на настоящем KeenKit (в CI скачивается по закреплённому коммиту с проверкой SHA-256): установка, откат, миграция с v1, а также функциональные прогоны пропатченного `ota_update` с заглушками сети — п.8 aarch64/mipsel, п.5, защита модели, вложенные папки, сравнение с оригиналом.

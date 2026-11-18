@@ -17,6 +17,9 @@
 #     (CMCC RAX3000Me = папка CMCC_RAX3000M, как в wiki Athena)
 #   - шапка: «Загрузчик: Athena r41 (2.14.0)»
 # После «99. Обновить скрипт» в KeenKit патч нужно применить заново.
+#
+# НЕОФИЦИАЛЬНО: не связано с KeenKit (spatiumstas) и Project Athens. С проблемами после
+# патча не обращайтесь к авторам KeenKit и Athena. Используйте на свой риск.
 
 set -u
 
@@ -263,6 +266,7 @@ cmd_apply() {
   install_atomic "$TMP_DIR/patched" "$TARGET"
   set_domain
   ok "Патч $PATCH_VERSION применён к KeenKit $VER"
+  warn "Неофициальный патч: с проблемами не обращайтесь к авторам KeenKit и Athena"
   echo "  п.5 прошивки:  $FW_DOMAIN/osvault"
   echo "  п.8 KeenBOOT:  $FW_DOMAIN/files/athena (aarch64), остальные — как в KeenKit"
   echo "  копия:         $BACKUP"
