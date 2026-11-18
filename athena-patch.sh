@@ -14,12 +14,13 @@
 #   - п.8 на aarch64: каталог /files/athena вместо /files/keenboot/aarch64
 #   - вход в единственную вложенную папку модели (Cudy_TR3000/r41/)
 #   - защита: папка не совпадает с моделью роутера -> нужно ввести YES
+#     (CMCC RAX3000Me = папка CMCC_RAX3000M, как в wiki Athena)
 #   - шапка: «Загрузчик: Athena r41 (2.14.0)»
 # После «99. Обновить скрипт» в KeenKit патч нужно применить заново.
 
 set -u
 
-PATCH_VERSION="0.0.2"
+PATCH_VERSION="0.0.3"
 TESTED_KEENKIT="2.9.5"
 
 # ATHENA_ROOT — только для тестов, на роутере пусто.
@@ -102,9 +103,16 @@ EOF
   if [ "$ota_mode" = "keenboot" ] && [ "$ota_path" = "/files/athena" ]; then
     athena_dir=$(echo "$DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[_-]/ /g')
     athena_dev=$(echo "$current_device_model" | tr '[:upper:]' '[:lower:]' | sed 's/[_-]/ /g')
+    case "$athena_dev" in
+    rax3000me) athena_alias="rax3000m" ;; # wiki Athena: один файл для CMCC RAX3000M/Me
+    *) athena_alias="" ;;
+    esac
     athena_match=0
     if [ -n "$athena_dev" ]; then
       case "$athena_dir" in *"$athena_dev"*) athena_match=1 ;; esac
+      if [ -n "$athena_alias" ]; then
+        case "$athena_dir" in *"$athena_alias"*) athena_match=1 ;; esac
+      fi
     fi
     if [ "$athena_match" -ne 1 ]; then
       print_message "Папка $(printf '%s' "$DIR" | sed 's/%/%%/g') не совпадает с моделью роутера: $(printf '%s' "${current_device_model:-неизвестна}" | sed 's/%/%%/g')" "$RED"

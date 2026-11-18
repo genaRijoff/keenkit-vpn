@@ -40,8 +40,8 @@ out=$(run status)
 has "status до патча" "$out" "не применён"
 out=$(run); rc=$?
 eq "apply: rc=0" "$rc" 0
-has "apply: сообщение" "$out" "Патч 0.0.2 применён к KeenKit $VER"
-eq "метка версии патча" "$(sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/p' "$(T)")" "0.0.2"
+has "apply: сообщение" "$out" "Патч 0.0.3 применён к KeenKit $VER"
+eq "метка версии патча" "$(sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/p' "$(T)")" "0.0.3"
 same "копия оригинала" "$R/opt/keenkit.sh.$VER.orig" "$SRC"
 [ -L "$R/opt/bin/keenkit" ] && ok "симлинк сохранён" || bad "симлинк сохранён"
 $SH -n "$(T)" && ok "синтаксис пропатченного KeenKit" || bad "синтаксис пропатченного KeenKit"
@@ -54,10 +54,10 @@ out=$(run apply)
 has "повтор: уже применён" "$out" "уже применён"
 eq "повтор: файл не тронут" "$(md5sum <"$(T)")" "$m1"
 out=$(run diff)
-has "diff на пропатченном" "$out" '+ATHENA_PATCH="0.0.2"'
+has "diff на пропатченном" "$out" '+ATHENA_PATCH="0.0.3"'
 eq "diff: файл не тронут" "$(md5sum <"$(T)")" "$m1"
 out=$(run status)
-has "status после патча" "$out" "0.0.2"
+has "status после патча" "$out" "0.0.3"
 out=$(run revert); rc=$?
 eq "revert: rc=0" "$rc" 0
 same "revert: оригинал восстановлен" "$(T)" "$SRC"
@@ -186,7 +186,9 @@ ota_request() {
     ;;
   esac
   case "$url" in
-  "$D/files/athena") dir Cudy_TR3000/ Xiaomi_AX3000T/ Multi_TR3000/ Athena_UART.zip md5sum ;;
+  "$D/files/athena") dir Cudy_TR3000/ Xiaomi_AX3000T/ Multi_TR3000/ CMCC_RAX3000M/ Athena_UART.zip md5sum ;;
+  "$D/files/athena/CMCC_RAX3000M/") dir r41/ ;;
+  "$D/files/athena/CMCC_RAX3000M/r41/") dir Athena_CMCC_RAX3000M_r41.bin md5sum ;;
   "$D/files/athena/Cudy_TR3000/") dir r41/ ;;
   "$D/files/athena/Cudy_TR3000/r41/") dir Athena_Cudy_TR3000_r41.bin md5sum ;;
   "$D/files/athena/Xiaomi_AX3000T/") dir r41/ ;;
@@ -237,6 +239,13 @@ out=$(flow "$P" keenboot aarch64 TR3000 '2\nyes\n')
 hasnt "чужая модель: «yes» строчными не принимается" "$(cat "$W/log")" "Xiaomi_AX3000T/ "
 out=$(flow "$P" keenboot aarch64 TR3000 '2\nYES\n1\nn\n')
 has "чужая модель: YES — продолжить" "$(cat "$W/log")" "https://osv/files/athena/Xiaomi_AX3000T/r41/ "
+out=$(flow "$P" keenboot aarch64 RAX3000ME '4\n1\nn\n')
+hasnt "RAX3000Me -> CMCC_RAX3000M без YES (как в wiki Athena)" "$out" "не совпадает с моделью"
+has "RAX3000Me -> r41" "$(cat "$W/log")" "https://osv/files/athena/CMCC_RAX3000M/r41/ "
+out=$(flow "$P" keenboot aarch64 RAX3000ME '1\nno\n')
+has "RAX3000Me -> Cudy_TR3000: требует YES" "$out" "не совпадает с моделью роутера: RAX3000ME"
+out=$(flow "$P" keenboot aarch64 RAX3000M '4\n1\nn\n')
+hasnt "RAX3000M -> CMCC_RAX3000M без YES" "$out" "не совпадает с моделью"
 out=$(flow "$P" keenboot aarch64 "" '1\nno\n')
 has "модель неизвестна -> подтверждение" "$out" "неизвестна"
 hasnt "модель неизвестна: каталог не открыт" "$(cat "$W/log")" "Cudy_TR3000/ "

@@ -44,7 +44,7 @@ kvn 0.0.5
 Прошивки (Афина): https://osvault.project-athens.com
 KeenBOOT (Афина): https://osvault.project-athens.com/files/athena
 KeenKit: 2.9.5 OK
-Athena-патч: 0.0.2 (п.8 -> Athena)
+Athena-патч: 0.0.3 (п.8 -> Athena)
 KeenKit.conf: OK
 
 напрямую (x.x.x.x): KeenBOOT OK, прошивки OK
@@ -86,7 +86,7 @@ kvn опирается на внутренности KeenKit: `ota_path="/files/
 |---|---|
 | п.8 на aarch64 | каталог `/files/athena` вместо `/files/keenboot/aarch64`; mipsel и п.5 — без изменений |
 | Вложенная папка | единственная подпапка модели открывается автоматически (`Cudy_TR3000/r41/`); при нескольких — нет |
-| Защита модели | папка не совпадает с моделью роутера → запись только после ввода `YES` |
+| Защита модели | папка не совпадает с моделью роутера → запись только после ввода `YES` (RAX3000Me ↔ `CMCC_RAX3000M` считается совпадением — один файл по wiki Athena) |
 | Шапка | `Загрузчик: Athena r41 (2.14.0)` вместо `U-Boot phase` |
 
 Установка (если GitHub заблокирован — добавить `--interface nwg0`):

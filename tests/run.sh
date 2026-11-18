@@ -134,14 +134,14 @@ teardown
 
 echo "== athena-patch"
 setup
-sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.2"|' "$T/opt/keenkit.sh"
+sed -i 's|^SCRIPT_VERSION=.*|&\nATHENA_PATCH="0.0.3"|' "$T/opt/keenkit.sh"
 export KVN_ARCH=aarch64
 out=$(run)
 has "aarch64 + патч: шапка KeenBOOT Афина" "$out" "KeenBOOT: Афина"
 has "aarch64 + патч: проверка канала по /files/athena" "$(cat "$T/curl.log")" "--interface nwg0 -o /dev/null https://osvault.project-athens.com/files/athena/"
 hasnt "aarch64 + патч: Pages не проверяется" "$(grep -- '-o /dev/null' "$T/curl.log")" "spatiumstas.github.io"
 out=$(run check)
-has "check: строка патча" "$out" "Athena-патч: 0.0.2 (п.8 -> Athena)"
+has "check: строка патча" "$out" "Athena-патч: 0.0.3 (п.8 -> Athena)"
 has "check: источник KeenBOOT" "$out" "KeenBOOT (Афина): https://osvault.project-athens.com/files/athena"
 export KVN_ARCH=mipsel
 out=$(run)
