@@ -16,14 +16,15 @@
 #   - защита: папка не совпадает с моделью роутера -> нужно ввести YES
 #     (CMCC RAX3000Me = папка CMCC_RAX3000M, как в wiki Athena)
 #   - шапка: «Загрузчик: Athena r41 (2.14.0)»
-# После «99. Обновить скрипт» в KeenKit патч нужно применить заново.
+# После «99. Обновить скрипт» в KeenKit патч нужно применить заново; с keenkit-vpn это делает
+# команда keenkit (apply/revert включают/выключают в /opt/etc/keenkit-vpn.conf ATHENA="on"/"off").
 #
 # НЕОФИЦИАЛЬНО: не связано с KeenKit (spatiumstas) и Project Athens. С проблемами после
 # патча не обращайтесь к авторам KeenKit и Athena. Используйте на свой риск.
 
 set -u
 
-PATCH_VERSION="0.0.4"
+PATCH_VERSION="0.0.5"
 TESTED_KEENKIT="2.9.5"
 
 # ATHENA_ROOT — только для тестов, на роутере пусто.
@@ -32,6 +33,7 @@ LINK="$ROOT/opt/bin/keenkit"
 DEFAULT_TARGET="$ROOT/opt/keenkit.sh"
 CONF="$ROOT/opt/etc/KeenKit.conf"
 V1_BACKUP="$ROOT/opt/bin/keenkit.before-athena"
+VPN_CONF="$ROOT/opt/etc/keenkit-vpn.conf"
 FW_DOMAIN="https://osvault.project-athens.com"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -280,6 +282,24 @@ set_domain() {
   info "Домен OTA: $FW_DOMAIN"
 }
 
+# keenkit-vpn: ATHENA="on" — лаунчер keenkit возвращает п.9 после «99. Обновить скрипт».
+# Без keenkit-vpn (нет его настроек) ничего не делает.
+set_autorestore() {
+  val="$1"
+  [ -f "$VPN_CONF" ] || return 0
+  grep -qx "ATHENA=\"$val\"" "$VPN_CONF" && return 0
+  tmp="$VPN_CONF.athena.$$"
+  if grep -q '^ATHENA=' "$VPN_CONF"; then
+    sed "s/^ATHENA=.*/ATHENA=\"$val\"/" "$VPN_CONF" >"$tmp"
+  else
+    { cat "$VPN_CONF" && printf 'ATHENA="%s"\n' "$val"; } >"$tmp"
+  fi
+  if ! { chmod 600 "$tmp" && mv -f "$tmp" "$VPN_CONF"; }; then
+    rm -f "$tmp"
+    warn "Не удалось обновить $VPN_CONF"
+  fi
+}
+
 # ---------- команды ----------
 
 prepare() {
@@ -296,6 +316,7 @@ cmd_apply() {
   lock "$TARGET"
   if [ "$(patch_version "$TARGET")" = "$PATCH_VERSION" ] && verify_patched "$TARGET"; then
     set_domain
+    set_autorestore on
     ok "Патч $PATCH_VERSION уже применён к KeenKit $VER"
     return 0
   fi
@@ -310,19 +331,21 @@ cmd_apply() {
   verify_patched "$TMP_DIR/patched" || die "Проверка патча не прошла. KeenKit не изменён"
   install_atomic "$TMP_DIR/patched" "$TARGET"
   set_domain
+  set_autorestore on
   ok "Патч $PATCH_VERSION применён к KeenKit $VER"
   warn "Неофициальный патч: с проблемами не обращайтесь к авторам KeenKit и Athena"
   echo "  п.5 прошивки:  $FW_DOMAIN/osvault"
   echo "  п.8 KeenBOOT:  как в KeenKit"
   echo "  п.9 Athena:    $FW_DOMAIN/files/athena (только aarch64)"
   echo "  копия:         $BACKUP"
-  echo "  откат:         sh $0 revert"
+  echo "  откат:         athena-patch revert (или keenkit --athena off)"
 }
 
 cmd_revert() {
   prepare
   lock "$TARGET"
   if is_clean "$TARGET"; then
+    set_autorestore off
     ok "KeenKit $VER не изменён — откатывать нечего"
     return 0
   fi
@@ -335,6 +358,7 @@ cmd_revert() {
   fi
   sh -n "$src" || die "Копия $src повреждена"
   install_atomic "$src" "$TARGET"
+  set_autorestore off
   ok "Оригинальный KeenKit $VER восстановлен из $src"
 }
 
@@ -383,6 +407,6 @@ revert) cmd_revert ;;
 status) cmd_status ;;
 diff) cmd_diff ;;
 -V | --version) echo "$PATCH_VERSION" ;;
--h | --help) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//' ;;
+-h | --help) sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//' ;;
 *) die "Неизвестная команда: $1 (--help)" ;;
 esac

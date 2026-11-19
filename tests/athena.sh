@@ -8,6 +8,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 PATCH=${PATCH:-$HERE/../athena-patch.sh}
 SRC=${KEENKIT_SRC:?укажи KEENKIT_SRC — путь к оригинальному keenkit.sh}
 SH=${TEST_SH:-busybox sh}
+LAUNCHER=${LAUNCHER:-$HERE/../keenkit}
+PV=$(sed -n 's/^PATCH_VERSION="\(.*\)"$/\1/p' "$PATCH")
 PASS=0
 FAIL=0
 R=""
@@ -41,8 +43,8 @@ out=$(run status)
 has "status до патча" "$out" "не применён"
 out=$(run); rc=$?
 eq "apply: rc=0" "$rc" 0
-has "apply: сообщение" "$out" "Патч 0.0.4 применён к KeenKit $VER"
-eq "метка версии патча" "$(sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/p' "$(T)")" "0.0.4"
+has "apply: сообщение" "$out" "Патч $PV применён к KeenKit $VER"
+eq "метка версии патча" "$(sed -n 's/^ATHENA_PATCH="\(.*\)"$/\1/p' "$(T)")" "$PV"
 same "копия оригинала" "$R/opt/keenkit.sh.$VER.orig" "$SRC"
 [ -L "$R/opt/bin/keenkit" ] && ok "симлинк сохранён" || bad "симлинк сохранён"
 $SH -n "$(T)" && ok "синтаксис пропатченного KeenKit" || bad "синтаксис пропатченного KeenKit"
@@ -55,10 +57,10 @@ out=$(run apply)
 has "повтор: уже применён" "$out" "уже применён"
 eq "повтор: файл не тронут" "$(md5sum <"$(T)")" "$m1"
 out=$(run diff)
-has "diff на пропатченном" "$out" '+ATHENA_PATCH="0.0.4"'
+has "diff на пропатченном" "$out" "+ATHENA_PATCH=\"$PV\""
 eq "diff: файл не тронут" "$(md5sum <"$(T)")" "$m1"
 out=$(run status)
-has "status после патча" "$out" "0.0.4"
+has "status после патча" "$out" "$PV"
 out=$(run revert); rc=$?
 eq "revert: rc=0" "$rc" 0
 same "revert: оригинал восстановлен" "$(T)" "$SRC"
@@ -302,6 +304,51 @@ eq "U-Boot без изменений" "$(pbv "$P" x "U-Boot 2025.07-rev-3")" "$(
 eq "оригинал показывал «U-Boot phase»" "$(pbv "$O" x "foo\n2.14.0_athena-r41\nU-Boot phase")" "U-Boot phase"
 
 rm -rf "$W"
+echo "== keenkit-vpn: ATHENA в keenkit-vpn.conf"
+setup
+run >/dev/null
+[ ! -e "$R/opt/etc/keenkit-vpn.conf" ] && ok "без keenkit-vpn: настройки не создаются" || bad "без keenkit-vpn: настройки не создаются"
+run revert >/dev/null
+printf 'IFACES="direct auto"\n' >"$R/opt/etc/keenkit-vpn.conf"
+run >/dev/null
+eq "apply: ATHENA=on добавлен" "$(cat "$R/opt/etc/keenkit-vpn.conf")" 'IFACES="direct auto"
+ATHENA="on"'
+run >/dev/null
+eq "повторный apply: строка не дублируется" "$(grep -c '^ATHENA=' "$R/opt/etc/keenkit-vpn.conf")" 1
+run revert >/dev/null
+eq "revert: ATHENA=off" "$(cat "$R/opt/etc/keenkit-vpn.conf")" 'IFACES="direct auto"
+ATHENA="off"'
+run revert >/dev/null
+eq "revert на чистом KeenKit: ATHENA=off" "$(grep '^ATHENA=' "$R/opt/etc/keenkit-vpn.conf")" 'ATHENA="off"'
+n=0; for f in "$R"/opt/etc/*.athena.*; do [ -e "$f" ] && n=$((n + 1)); done
+eq "временных файлов настроек нет" "$n" 0
+teardown
+
+echo "== keenkit-vpn: возврат п.9 после «99. Обновить скрипт» (лаунчер + athena-patch + KeenKit)"
+setup
+rm -f "$R/opt/bin/keenkit"
+cp "$LAUNCHER" "$R/opt/bin/keenkit"
+cp "$PATCH" "$R/opt/bin/athena-patch"
+printf '#!/bin/sh\nexit 7\n' >"$R/opt/bin/curl"
+chmod 755 "$R/opt/bin/keenkit" "$R/opt/bin/athena-patch" "$R/opt/bin/curl"
+kv() { KEENKIT_VPN_ROOT="$R" KEENKIT_VPN_ARCH=aarch64 $SH "$R/opt/bin/keenkit" "$@" 2>&1; }
+out=$(kv --athena on); rc=$?
+eq "keenkit --athena on: rc=0" "$rc" 0
+cp "$(T)" "$R/patched.ref"
+eq "keenkit --athena on: ATHENA=on" "$(grep '^ATHENA=' "$R/opt/etc/keenkit-vpn.conf")" 'ATHENA="on"'
+cp "$SRC" "$(T)"
+out=$(kv </dev/null | head -n 2)
+has "после «99»: сообщение" "$out" "п.9 Athena возвращён (KeenKit $VER)"
+has "после «99»: п.9 в шапке" "$out" "Athena: п.9"
+same "после «99»: KeenKit пропатчен как раньше" "$(T)" "$R/patched.ref"
+out=$(kv --athena off); rc=$?
+eq "keenkit --athena off: rc=0" "$rc" 0
+same "keenkit --athena off: оригинал" "$(T)" "$SRC"
+out=$(kv </dev/null | head -n 2)
+same "ATHENA=off: KeenKit не меняется при запуске" "$(T)" "$SRC"
+hasnt "ATHENA=off: без п.9 в шапке" "$out" "Athena: п.9"
+teardown
+
 echo
 echo "Итого: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

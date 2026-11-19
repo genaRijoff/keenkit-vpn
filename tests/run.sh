@@ -239,7 +239,7 @@ export KEENKIT_VPN_ARCH=aarch64
 out=$(run)
 has "athena 0.0.4: шапка с п.9" "$out" "KeenBOOT: Стас  Athena: п.9  Каналы:"
 out=$(run --check)
-has "athena 0.0.4: check" "$out" "Athena-патч: 0.0.4 (п.9 -> Athena, https://osvault.project-athens.com/files/athena)"
+has "athena 0.0.4: check" "$out" "Athena-патч: 0.0.4 (п.9 -> Athena, https://osvault.project-athens.com/files/athena), возврат после обновления KeenKit: выкл"
 export KEENKIT_VPN_ARCH=mipsel
 out=$(run)
 hasnt "mipsel: без п.9 в шапке" "$out" "Athena: п.9"
@@ -253,7 +253,99 @@ export KEENKIT_VPN_ARCH=aarch64
 out=$(run)
 has "athena 0.0.3: KeenBOOT Афина" "$out" "KeenBOOT: Афина"
 out=$(run --check)
-has "athena 0.0.3: предложение обновить" "$out" "Athena-патч: 0.0.3 (п.8 -> Athena; обнови: athena-patch)"
+has "athena 0.0.3: предложение обновить" "$out" "Athena-патч: 0.0.3 (п.8 -> Athena; обнови: keenkit --athena on)"
+unset KEENKIT_VPN_ARCH
+teardown
+
+echo "== п.9 Athena: keenkit --athena и возврат после обновления KeenKit"
+# Поддельный athena-patch: пишет вызовы в журнал; apply добавляет п.9 в KeenKit, revert убирает.
+# $T/athena_fail — apply завершается ошибкой.
+fake_athena() {
+  cat >"$T/opt/bin/athena-patch" <<EOF
+#!/bin/sh
+# athena-patch — поддельный
+PATCH_VERSION="0.0.5"
+echo "\$1 root=\${ATHENA_ROOT:-}" >>"$T/athena.log"
+K="\$ATHENA_ROOT/opt/keenkit.sh"
+case "\$1" in
+apply)
+  [ -f "$T/athena_fail" ] && { echo "якорь 3 найден 0 раз(а)"; echo "Структура KeenKit не совпадает"; exit 1; }
+  grep -q '^ATHENA_PATCH=' "\$K" || sed -i "s|^SCRIPT_VERSION=.*|&\\nATHENA_PATCH=\"0.0.5\"\\n: <<'athena'\\n    9) ota_update \"athena\" ;; # athena-patch\\nathena|" "\$K"
+  echo "Патч применён" ;;
+revert) sed -i -e '/athena/d' -e '/ATHENA/d' "\$K"; echo "Оригинал восстановлен" ;;
+status) echo "athena-patch 0.0.5" ;;
+esac
+EOF
+}
+athena_calls() { [ ! -f "$T/athena.log" ] || tr '\n' ';' <"$T/athena.log"; }
+setup
+fake_athena
+export KEENKIT_VPN_ARCH=aarch64
+out=$(run --athena on); rc=$?
+eq "--athena on: rc=0" "$rc" 0
+eq "--athena on: apply в корне роутера" "$(athena_calls)" "apply root=$T;"
+has "--athena on: вывод athena-patch" "$out" "Патч применён"
+out=$(run --athena)
+has "--athena: состояние athena-patch" "$out" "athena-patch 0.0.5"
+has "--athena: возврат выкл (настройку меняет сам athena-patch)" "$out" "Возврат п.9 после обновления KeenKit: выкл"
+rm -f "$T/athena.log"
+printf 'ATHENA="on"\n' >>"$T/opt/etc/keenkit-vpn.conf"
+out=$(run)
+eq "п.9 есть: athena-patch не вызывается" "$(athena_calls)" ""
+has "п.9 есть: шапка" "$out" "Athena: п.9"
+sed -i -e '/athena/d' -e '/ATHENA/d' "$T/opt/keenkit.sh"
+out=$(run)
+eq "после обновления KeenKit: apply" "$(athena_calls)" "apply root=$T;"
+has "после обновления KeenKit: сообщение" "$out" "keenkit-vpn: п.9 Athena возвращён (KeenKit 2.9.2)"
+has "после обновления KeenKit: п.9 в шапке" "$out" "Athena: п.9"
+has "после обновления KeenKit: KeenKit запущен" "$out" "KK IFACES="
+out=$(run --check)
+has "--check: возврат вкл" "$out" "возврат после обновления KeenKit: вкл"
+sed -i -e '/athena/d' -e '/ATHENA/d' "$T/opt/keenkit.sh"
+rm -f "$T/athena.log"
+touch "$T/athena_fail"
+out=$(run); rc=$?
+eq "apply с ошибкой: KeenKit всё равно запущен" "$(echo "$out" | grep -c 'KK ARGS=')" 1
+has "apply с ошибкой: причина" "$out" "якорь 3 найден 0 раз(а)"
+has "apply с ошибкой: подсказка" "$out" "Не пытаться: keenkit --athena off"
+hasnt "apply с ошибкой: п.9 нет в шапке" "$out" "Athena: п.9"
+out=$(run --check)
+has "--check: п.9 не применён, но включён" "$out" "не применён, вернётся при запуске keenkit"
+rm -f "$T/athena_fail" "$T/athena.log"
+out=$(run --iface direct)
+eq "--iface: возврат п.9 тоже работает" "$(athena_calls)" "apply root=$T;"
+rm -f "$T/athena.log"
+out=$(run --athena off); rc=$?
+eq "--athena off: rc=0" "$rc" 0
+eq "--athena off: revert" "$(athena_calls)" "revert root=$T;"
+out=$(run --athena nonsense); rc=$?
+eq "--athena с неверным значением: rc=1" "$rc" 1
+sed -i 's/^ATHENA=.*/ATHENA="off"/' "$T/opt/etc/keenkit-vpn.conf"
+rm -f "$T/athena.log"
+out=$(run)
+eq "ATHENA=off: п.9 не возвращается" "$(athena_calls)" ""
+out=$(run --check)
+has "--check: ATHENA=off на aarch64" "$out" "Athena-патч: нет (добавить п.9: keenkit --athena on)"
+sed -i 's/^ATHENA=.*/ATHENA="yes"/' "$T/opt/etc/keenkit-vpn.conf"
+out=$(run)
+has "ATHENA=yes: ошибка настроек -> обычный запуск" "$out" "ошибка в $T/opt/etc/keenkit-vpn.conf"
+eq "ATHENA=yes: athena-patch не вызывается" "$(athena_calls)" ""
+sed -i 's/^ATHENA=.*/ATHENA="on"/' "$T/opt/etc/keenkit-vpn.conf"
+export KEENKIT_VPN_ARCH=mipsel
+out=$(run)
+eq "mipsel: п.9 не возвращается" "$(athena_calls)" ""
+out=$(run --athena on); rc=$?
+eq "mipsel: --athena on: rc=1" "$rc" 1
+has "mipsel: --athena on: причина" "$out" "Athena только для MT7981 (aarch64), здесь mipsel"
+export KEENKIT_VPN_ARCH=aarch64
+rm -f "$T/opt/bin/athena-patch"
+out=$(run); rc=$?
+has "нет athena-patch: KeenKit запущен" "$out" "KK ARGS="
+out=$(run --athena on); rc=$?
+eq "нет athena-patch: --athena on: rc=1" "$rc" 1
+has "нет athena-patch: подсказка" "$out" "переустанови keenkit-vpn"
+out=$(run --athena)
+has "нет athena-patch: состояние" "$out" "athena-patch не установлен"
 unset KEENKIT_VPN_ARCH
 teardown
 
@@ -323,22 +415,30 @@ inst_setup() {
   setup
   rm -f "$T/opt/bin/keenkit"
   ln -s /opt/keenkit.sh "$T/opt/bin/keenkit"
-  # curl для установщика: отдаёт файл из $T/src (режимы: ok, html, broken, fail)
+  # curl для установщика: keenkit -> $T/src (режим $T/mode), athena-patch.sh -> $T/src_athena
+  # (режим $T/amode, по умолчанию ok). Режимы: ok, html, broken, fail
   cat >"$T/opt/bin/curl" <<EOF
 #!/bin/sh
 echo "\$*" >>"$T/curl.log"
-out=""; while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && out="\$2"; shift; done
-case "\$(cat "$T/mode")" in
-ok) cp "$T/src" "\$out" ;;
+out=""; url=""
+while [ \$# -gt 0 ]; do [ "\$1" = "-o" ] && out="\$2"; url="\$1"; shift; done
+case "\$url" in
+*/athena-patch.sh) src="$T/src_athena"; mode=\$(cat "$T/amode" 2>/dev/null || echo ok) ;;
+*) src="$T/src"; mode=\$(cat "$T/mode") ;;
+esac
+case "\$mode" in
+ok) cp "\$src" "\$out" ;;
 html) echo "<html>404</html>" >"\$out" ;;
-broken) head -n 120 "$T/src" >"\$out" ;;
-fail) exit 22 ;;
+broken) head -n 3 "\$src" >"\$out"; echo 'if then' >>"\$out" ;;
+fail) printf PARTIAL >"\$out"; exit 22 ;;
 esac
 EOF
   chmod +x "$T/opt/bin/curl"
   cp "$LAUNCHER" "$T/src"
+  fake_athena
+  mv "$T/opt/bin/athena-patch" "$T/src_athena"
 }
-inst() { KEENKIT_VPN_ROOT="$T" $SH "$INSTALL" "$@" 2>&1; }
+inst() { KEENKIT_VPN_ROOT="$T" KEENKIT_VPN_ARCH="${ARCH:-mipsel}" $SH "$INSTALL" "$@" 2>&1; }
 
 inst_setup; echo ok >"$T/mode"
 out=$(inst); rc=$?
@@ -382,6 +482,65 @@ out=$(inst)
 has "чужой файл keenkit сохраняется" "$out" "сохранён: $T/opt/bin/keenkit.orig-"
 n=0; for f in "$T"/opt/bin/keenkit.orig-*; do [ -f "$f" ] && grep -q foreign "$f" && n=$((n + 1)); done
 eq "копия чужого файла" "$n" 1
+teardown
+
+echo "== install.sh: athena-patch"
+inst_setup; echo ok >"$T/mode"
+out=$(ARCH=aarch64 inst); rc=$?
+eq "aarch64: rc=0" "$rc" 0
+cmp -s "$T/opt/bin/athena-patch" "$T/src_athena" && ok "aarch64: athena-patch установлен" || bad "aarch64: athena-patch установлен"
+[ -x "$T/opt/bin/athena-patch" ] && ok "aarch64: athena-patch исполняемый" || bad "aarch64: athena-patch исполняемый"
+eq "aarch64: п.9 применён через лаунчер" "$(athena_calls)" "apply root=$T;"
+has "aarch64: сообщение" "$out" "Athena: п.9 в KeenKit, возвращается сам"
+grep -q '^    9) ota_update "athena"' "$T/opt/keenkit.sh" && ok "aarch64: п.9 в KeenKit" || bad "aarch64: п.9 в KeenKit"
+[ -f "$T/opt/etc/keenkit-vpn.conf" ] && ok "aarch64: настройки созданы лаунчером" || bad "aarch64: настройки созданы лаунчером"
+rm -f "$T/athena.log"
+out=$(ARCH=aarch64 inst --no-athena); rc=$?
+eq "--no-athena: rc=0" "$rc" 0
+eq "--no-athena: athena-patch не вызывается" "$(athena_calls)" ""
+hasnt "--no-athena: без сообщения про Athena" "$out" "Athena:"
+: >"$T/curl.log"
+ARCH=aarch64 inst nwg0 --no-athena >/dev/null
+eq "интерфейс и --no-athena: оба файла через nwg0" "$(grep -c -- '--interface nwg0' "$T/curl.log")" 2
+out=$(inst --bogus); rc=$?
+eq "неизвестный параметр: rc=1" "$rc" 1
+out=$(inst nwg0 nwg1); rc=$?
+eq "два интерфейса: rc=1" "$rc" 1
+teardown
+
+inst_setup; echo ok >"$T/mode"
+out=$(inst); rc=$?
+eq "mipsel: rc=0" "$rc" 0
+has "mipsel: п.9 не добавлен" "$out" "Athena: только для MT7981 (aarch64), здесь mipsel"
+eq "mipsel: athena-patch не вызывается" "$(athena_calls)" ""
+[ -f "$T/opt/bin/athena-patch" ] && ok "mipsel: athena-patch всё равно установлен" || bad "mipsel: athena-patch всё равно установлен"
+teardown
+
+for mode in html broken fail; do
+  inst_setup; echo ok >"$T/mode"; echo "$mode" >"$T/amode"
+  out=$(ARCH=aarch64 inst); rc=$?
+  eq "athena-patch $mode: rc=0 (лаунчер установлен)" "$rc" 0
+  grep -qx '# keenkit-vpn-launcher' "$T/opt/bin/keenkit" && ok "athena-patch $mode: лаунчер на месте" || bad "athena-patch $mode: лаунчер на месте"
+  [ ! -e "$T/opt/bin/athena-patch" ] && ok "athena-patch $mode: не установлен" || bad "athena-patch $mode: не установлен"
+  has "athena-patch $mode: предупреждение" "$out" "п.9 Athena не обновлён"
+  n=0; for f in "$T"/opt/bin/*.new.*; do [ -e "$f" ] && n=$((n + 1)); done
+  eq "athena-patch $mode: временных файлов нет" "$n" 0
+  teardown
+done
+
+inst_setup; echo ok >"$T/mode"
+fake_athena
+echo fail >"$T/amode"
+out=$(ARCH=aarch64 inst); rc=$?
+eq "загрузка не удалась, старый athena-patch: п.9 применён им" "$(athena_calls)" "apply root=$T;"
+teardown
+
+inst_setup; echo ok >"$T/mode"
+touch "$T/athena_fail"
+out=$(ARCH=aarch64 inst); rc=$?
+eq "apply с ошибкой: rc=0" "$rc" 0
+has "apply с ошибкой: предупреждение" "$out" "п.9 Athena не добавлен, keenkit работает без него"
+has "apply с ошибкой: причина" "$out" "Структура KeenKit не совпадает"
 teardown
 
 inst_setup; echo ok >"$T/mode"

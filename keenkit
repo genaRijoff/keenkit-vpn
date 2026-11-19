@@ -3,7 +3,7 @@
 # keenkit — запуск KeenKit через доступный канал (напрямую или VPN) с раздельными OTA-источниками:
 #   п.5 OTA Update (прошивки) -> FW_DOMAIN (Афина)
 #   п.8 KeenBOOT OTA Update    -> KB_BASE   (Стас)
-#   п.9 Athena OTA Update      -> FW_DOMAIN/files/athena (с athena-patch 0.0.4+, aarch64)
+#   п.9 Athena OTA Update      -> FW_DOMAIN/files/athena (athena-patch, только aarch64)
 # Ставится вместо симлинка /opt/bin/keenkit; сам KeenKit (/opt/keenkit.sh) не меняется.
 # Каждый внешний запрос KeenKit идёт через каналы по порядку, начиная с последнего удачного;
 # при сетевой ошибке — повтор через следующий канал.
@@ -12,14 +12,19 @@
 #   keenkit [аргументы]      запуск KeenKit (аргументы передаются KeenKit как есть)
 #   keenkit --iface nwg1     только этот канал, без резерва (direct — напрямую)
 #   keenkit --check          проверка каналов, источников и совместимости с KeenKit
+#   keenkit --athena on      добавить п.9 Athena (aarch64); после «99. Обновить скрипт»
+#                            keenkit возвращает его сам
+#   keenkit --athena off     убрать п.9, вернуть оригинальный KeenKit
+#   keenkit --athena         состояние Athena-патча
 #   keenkit --vpn-remove     вернуть обычный запуск KeenKit (симлинк на /opt/keenkit.sh)
 #   keenkit --vpn-version    версия keenkit-vpn
 # Настройки: /opt/etc/keenkit-vpn.conf
 #   IFACES — каналы по порядку: direct (без туннеля), имена интерфейсов,
 #            auto (все wg*/nwg*, затем awg*/nawg*, затем mitun*). По умолчанию: direct auto
+#   ATHENA — on/off: возвращать п.9 после обновления KeenKit (меняется через keenkit --athena)
 
 # keenkit-vpn-launcher
-VERSION="0.0.8"
+VERSION="0.0.9"
 KK_TESTED="2.9.1 2.9.2 2.9.3 2.9.4 2.9.5"
 
 set -u
@@ -34,6 +39,7 @@ STATE="$ROOT/tmp/keenkit-vpn.iface"
 KK_SCRIPT="$ROOT/opt/keenkit.sh"
 KK_CONF="$ROOT/opt/etc/KeenKit.conf"
 REAL_CURL="$ROOT/opt/bin/curl"
+ATHENA_BIN="$ROOT/opt/bin/athena-patch"
 NET_DIR="$ROOT/sys/class/net"
 ARCH="${KEENKIT_VPN_ARCH:-$(uname -m)}"
 
@@ -44,6 +50,7 @@ FW_DOMAIN="https://osvault.project-athens.com"
 FW_LABEL="Афина"
 KB_BASE="https://spatiumstas.github.io/KeenKit"
 KB_LABEL="Стас"
+ATHENA="off"
 
 # Цвета только в терминале и без NO_COLOR (https://no-color.org)
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -84,6 +91,8 @@ FW_LABEL="$FW_LABEL"
 # п.8 KeenBOOT OTA Update — загрузчики
 KB_BASE="$KB_BASE"
 KB_LABEL="$KB_LABEL"
+# п.9 Athena: on — возвращать после «99. Обновить скрипт» (keenkit --athena on/off)
+ATHENA="$ATHENA"
 EOF
   chmod 600 "$CONF"
 }
@@ -126,6 +135,7 @@ load_conf() {
     FW_LABEL) FW_LABEL=$val ;;
     KB_BASE) KB_BASE=$val ;;
     KB_LABEL) KB_LABEL=$val ;;
+    ATHENA) ATHENA=$val ;;
     PROBE_URL) ;; # устарел с 0.0.3, проверяются оба источника
     *) warn "$CONF: неизвестный параметр «$key», пропущен" ;;
     esac
@@ -134,6 +144,7 @@ load_conf() {
   valid_url "$FW_DOMAIN" || die "FW_DOMAIN: нужен https://хост без / в конце ($FW_DOMAIN)"
   valid_url "$KB_BASE" || die "KB_BASE: нужен https://хост[/путь] без / в конце ($KB_BASE)"
   [ -n "$IFACES" ] || die "IFACES пуст"
+  case "$ATHENA" in on | off) ;; *) die "ATHENA: нужно on или off ($ATHENA)" ;; esac
   for i in $IFACES; do
     valid_iface_name "$i" || die "IFACES: недопустимое имя интерфейса «$i»"
   done
@@ -178,6 +189,52 @@ resolve_kb_source() {
     KB_URL="$KB_BASE"
     KB_NAME="$KB_LABEL"
   fi
+}
+
+athena_run() {
+  ATHENA_ROOT="$ROOT" sh "$ATHENA_BIN" "$@"
+}
+
+# После «99. Обновить скрипт» KeenKit приходит без п.9 — патч применяется заново.
+# Ошибка не мешает запуску: KeenKit стартует без п.9, athena-patch его не меняет.
+athena_restore() {
+  local out
+  [ "$ATHENA" = "on" ] && [ "$ARCH" = "aarch64" ] && [ -f "$ATHENA_BIN" ] || return 0
+  athena_menu9 && return 0
+  if out=$(athena_run apply 2>&1); then
+    msg "keenkit-vpn: п.9 Athena возвращён (KeenKit $(kk_version))"
+  else
+    warn "keenkit-vpn: не удалось вернуть п.9 Athena:"
+    printf '%s\n' "$out" | tail -n 3 >&2
+    warn "KeenKit запускается без п.9. Не пытаться: keenkit --athena off"
+  fi
+}
+
+cmd_athena() {
+  case "${1:-status}" in
+  on)
+    [ "$ARCH" = "aarch64" ] || die "Athena только для MT7981 (aarch64), здесь $ARCH"
+    [ -f "$ATHENA_BIN" ] || die "Нет $ATHENA_BIN — переустанови keenkit-vpn (install.sh)"
+    athena_run apply
+    ;;
+  off)
+    [ -f "$ATHENA_BIN" ] || die "Нет $ATHENA_BIN — п.9 не устанавливался"
+    athena_run revert
+    ;;
+  status)
+    if [ -f "$ATHENA_BIN" ]; then
+      athena_run status
+    else
+      printf 'athena-patch не установлен\n'
+    fi
+    printf 'Возврат п.9 после обновления KeenKit: %s\n' "$(athena_onoff)"
+    ;;
+  *) die "keenkit --athena on|off" ;;
+  esac
+}
+
+athena_onoff() {
+  if [ "$ATHENA" = "on" ]; then echo "вкл"; else echo "выкл"; fi
 }
 
 # ---------- сеть ----------
@@ -344,12 +401,13 @@ set_kk_domain() {
 cmd_run() {
   local cands i labels
   [ -f "$KK_SCRIPT" ] || die "KeenKit не установлен ($KK_SCRIPT)"
+  athena_restore
   if [ ! -x "$REAL_CURL" ]; then
     warn "keenkit-vpn: нет $REAL_CURL — KeenKit запускается без выбора канала"
     exec sh "$KK_SCRIPT" "$@"
   fi
   if kk_athena_v1; then
-    warn "KeenKit изменён старым патчем Athena v1 — обнови: athena-patch"
+    warn "KeenKit изменён старым патчем Athena v1 — обнови: keenkit --athena on"
   elif ! kk_compatible; then
     warn "KeenKit $(kk_version): структура OTA изменилась, KeenBOOT может пойти не через $KB_NAME"
   fi
@@ -416,7 +474,7 @@ cmd_check() {
   if [ ! -f "$KK_SCRIPT" ]; then
     printf 'KeenKit: %bне установлен%b\n' "$RED" "$NC"
   elif kk_athena_v1; then
-    printf 'KeenKit: %b%s — старый патч Athena v1, обнови: athena-patch%b\n' "$YELLOW" "$v" "$NC"
+    printf 'KeenKit: %b%s — старый патч Athena v1, обнови: keenkit --athena on%b\n' "$YELLOW" "$v" "$NC"
   elif ! kk_compatible; then
     printf 'KeenKit: %b%s — структура OTA изменилась, нужна проверка keenkit-vpn%b\n' "$RED" "$v" "$NC"
   else
@@ -431,9 +489,16 @@ cmd_check() {
     if [ "$ARCH" != "aarch64" ]; then
       printf 'Athena-патч: %s (%s: Athena недоступна)\n' "$a" "$ARCH"
     elif athena_menu9; then
-      printf 'Athena-патч: %s (п.9 -> Athena, %s)\n' "$a" "$FW_DOMAIN/files/athena"
+      printf 'Athena-патч: %s (п.9 -> Athena, %s), возврат после обновления KeenKit: %s\n' \
+        "$a" "$FW_DOMAIN/files/athena" "$(athena_onoff)"
     else
-      printf 'Athena-патч: %s (п.8 -> Athena; обнови: athena-patch)\n' "$a"
+      printf 'Athena-патч: %s (п.8 -> Athena; обнови: keenkit --athena on)\n' "$a"
+    fi
+  elif [ "$ARCH" = "aarch64" ]; then
+    if [ "$ATHENA" = "on" ]; then
+      printf 'Athena-патч: %bне применён, вернётся при запуске keenkit%b\n' "$YELLOW" "$NC"
+    else
+      printf 'Athena-патч: нет (добавить п.9: keenkit --athena on)\n'
     fi
   fi
 
@@ -469,6 +534,9 @@ cmd_remove() {
       rm -rf "${WRAP%/*}"
       rm -f "$CONF" "$STATE"
       printf '%bГотово: keenkit снова запускает KeenKit напрямую. KeenKit.conf не тронут.%b\n' "$GREEN" "$NC"
+      if [ -n "$(athena_patch_version)" ]; then
+        printf 'П.9 Athena остался в KeenKit. Убрать: athena-patch revert\n'
+      fi
     else
       rm -f "$SELF.new.$$"
       die "Не удалось вернуть симлинк $SELF"
@@ -486,6 +554,7 @@ case "${1:-}" in
 --vpn-version) echo "$VERSION" ;;
 --check) load_conf && resolve_kb_source && cmd_check ;;
 --vpn-remove) cmd_remove ;;
+--athena) load_conf && cmd_athena "${2:-status}" ;;
 --iface)
   [ -n "${2:-}" ] || die "Укажи канал: keenkit --iface nwg1 (или direct)"
   [ "$2" = "direct" ] || iface_exists "$2" || die "Интерфейс $2 не найден. Есть: $(list_ifaces)"

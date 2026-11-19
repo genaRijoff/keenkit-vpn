@@ -8,12 +8,14 @@
 |---|---|
 | 5. OTA Update (прошивки) | `https://osvault.project-athens.com` (Афина) |
 | 8. KeenBOOT OTA Update | `https://spatiumstas.github.io/KeenKit` (Стас) |
-| 9. Athena OTA Update | `https://osvault.project-athens.com/files/athena` (Афина) — с [athena-patch](#athena-patch), только aarch64 |
+| 9. Athena OTA Update | `https://osvault.project-athens.com/files/athena` (Афина) — [athena-patch](#athena-patch), только MT7981 (aarch64) |
 
-Как это устроено: установщик заменяет симлинк `/opt/bin/keenkit` лаунчером. Сам KeenKit (`/opt/keenkit.sh`) не меняется, поэтому «99. Обновить скрипт» ничего не ломает. Лаунчер кладёт перед KeenKit в `PATH` обёртку `curl`, которая
+Как это устроено: установщик заменяет симлинк `/opt/bin/keenkit` лаунчером и ставит `athena-patch`. Лаунчер кладёт перед KeenKit в `PATH` обёртку `curl`, которая
 - отправляет каждый внешний запрос через каналы по порядку, начиная с последнего удачного; при сетевой ошибке повторяет его через следующий канал;
 - оставляет локальный RCI (`127.0.0.1:79`) напрямую;
 - перенаправляет `<osvault>/files/keenboot/*` на GitHub Pages Стаса.
+
+KeenKit (`/opt/keenkit.sh`) меняет только athena-patch (п.9, оригинал сохраняется). После «99. Обновить скрипт» `keenkit` при следующем запуске сам возвращает п.9.
 
 ## Установка и обновление
 
@@ -23,13 +25,21 @@
 curl -fsSL https://raw.githubusercontent.com/genaRijoff/keenkit-vpn/main/install.sh | sh
 ```
 
-Если GitHub у провайдера заблокирован — через туннель (интерфейс указывается дважды: для загрузки установщика и для загрузки лаунчера):
+Одна команда ставит всё: лаунчер `keenkit`, `athena-patch` и на MT7981 (aarch64) сразу добавляет п.9 Athena. Та же команда обновляет.
+
+Если GitHub у провайдера заблокирован — через туннель (интерфейс указывается дважды: для загрузки установщика и для загрузки скриптов):
 
 ```sh
 curl -fsSL --interface nwg0 https://raw.githubusercontent.com/genaRijoff/keenkit-vpn/main/install.sh | sh -s -- nwg0
 ```
 
-Установщик проверяет скачанный файл (shebang, метка, `VERSION`, `sh -n`) и заменяет его атомарно; при ошибке всё остаётся как было. Прежняя версия `kvn` удаляется, её настройки переносятся. Если `/opt/bin/keenkit` был не симлинком KeenKit, а чужим файлом, он сохраняется рядом (`keenkit.orig-<дата>`).
+Без п.9 Athena:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/genaRijoff/keenkit-vpn/main/install.sh | sh -s -- --no-athena
+```
+
+Установщик проверяет скачанные файлы (shebang, метка, версия, `sh -n`) и заменяет их атомарно. Ошибка загрузки лаунчера — ничего не меняется; ошибка `athena-patch` — лаунчер ставится, п.9 нет (с предупреждением). Прежняя версия `kvn` удаляется, её настройки переносятся. Если `/opt/bin/keenkit` был не симлинком KeenKit, а чужим файлом (например, KeenKit со старым патчем Athena v1), он сохраняется рядом (`keenkit.orig-<дата>`).
 
 После переустановки самого KeenKit (его `install.sh` заново создаёт симлинк) запустите установщик keenkit-vpn ещё раз.
 
@@ -39,6 +49,9 @@ curl -fsSL --interface nwg0 https://raw.githubusercontent.com/genaRijoff/keenkit
 keenkit                  запуск KeenKit (аргументы передаются KeenKit как есть)
 keenkit --iface nwg1     только nwg1, без резерва (direct — только напрямую)
 keenkit --check          каналы, источники, совместимость с KeenKit
+keenkit --athena on      добавить п.9 Athena (aarch64), возвращать после обновления KeenKit
+keenkit --athena off     убрать п.9, вернуть оригинальный KeenKit
+keenkit --athena         состояние п.9
 keenkit --vpn-remove     вернуть обычный запуск KeenKit (с подтверждением)
 keenkit --vpn-version    версия keenkit-vpn
 keenkit --vpn-help       справка
@@ -47,11 +60,11 @@ keenkit --vpn-help       справка
 Пример `keenkit --check`:
 
 ```
-keenkit-vpn 0.0.8
+keenkit-vpn 0.0.9
 Прошивки (Афина): https://osvault.project-athens.com
 KeenBOOT (Стас): https://spatiumstas.github.io/KeenKit
 KeenKit: 2.9.5 OK
-Athena-патч: 0.0.4 (п.9 -> Athena, https://osvault.project-athens.com/files/athena)
+Athena-патч: 0.0.5 (п.9 -> Athena, https://osvault.project-athens.com/files/athena), возврат после обновления KeenKit: вкл
 KeenKit.conf: OK
 Порядок каналов: напрямую -> nwg0 -> nwg1 -> awg0
 Последний удачный: nwg0
@@ -69,6 +82,7 @@ nwg0 (y.y.y.y): KeenBOOT OK, прошивки OK
 | `FW_LABEL` | `Афина` | подпись |
 | `KB_BASE` | `https://spatiumstas.github.io/KeenKit` | источник KeenBOOT (п.8) |
 | `KB_LABEL` | `Стас` | подпись |
+| `ATHENA` | `off` (установщик на aarch64 ставит `on`) | `on` — возвращать п.9 после «99. Обновить скрипт». Меняется командами `keenkit --athena on/off` (и `athena-patch apply/revert`) |
 
 Файл читается как данные (`KEY="value"`), а не исполняется; `` $ ` " \ `` в значениях запрещены. Ошибка в настройках не блокирует KeenKit: он запускается как обычно, с предупреждением.
 
@@ -79,6 +93,8 @@ nwg0 (y.y.y.y): KeenBOOT OK, прошивки OK
 ## Файлы на роутере
 
 - `/opt/bin/keenkit` — лаунчер (вместо симлинка на `/opt/keenkit.sh`)
+- `/opt/bin/athena-patch` — патч п.9
+- `/opt/keenkit.sh.<версия>.orig` — оригинал KeenKit (если применён athena-patch)
 - `/opt/etc/keenkit-vpn.conf` — настройки
 - `/opt/lib/keenkit-vpn/curl` — обёртка (генерируется лаунчером)
 - `/tmp/keenkit-vpn.iface` — последний удачный канал
@@ -103,21 +119,21 @@ nwg0 (y.y.y.y): KeenBOOT OK, прошивки OK
 | Защита модели | папка не совпадает с моделью роутера → запись только после ввода `YES` (RAX3000Me ↔ `CMCC_RAX3000M` считается совпадением — один файл по wiki Athena) |
 | Шапка | `Загрузчик: Athena r41 (2.14.0)` вместо `U-Boot phase` |
 
-Установка (если GitHub заблокирован — добавить `--interface nwg0`):
+Ставится установщиком keenkit-vpn (см. [Установка](#установка-и-обновление)). Управление:
 
 ```sh
-curl -fsSL -o /opt/bin/athena-patch https://raw.githubusercontent.com/genaRijoff/keenkit-vpn/main/athena-patch.sh
-chmod 755 /opt/bin/athena-patch
-athena-patch status    # состояние
-athena-patch diff      # что изменится, ничего не меняя
-athena-patch           # применить
-athena-patch revert    # вернуть оригинал
+keenkit --athena on      # применить и возвращать после «99. Обновить скрипт»
+keenkit --athena off     # вернуть оригинал и не возвращать
+keenkit --athena         # состояние
+athena-patch diff        # что изменится, ничего не меняя
 ```
+
+`athena-patch` работает и без лаунчера (`apply`, `revert`, `status`, `diff`); если стоит keenkit-vpn, `apply`/`revert` также включают/выключают `ATHENA` в его настройках.
 
 - Изменения вставляются после строк-якорей; каждый якорь должен встретиться ровно один раз, иначе KeenKit не трогается.
 - Оригинал сохраняется как `/opt/keenkit.sh.<версия>.orig`; замена атомарная (работающий KeenKit не ломается).
 - Патч v1 (`patch-athena.sh`, без метки) обновляется автоматически: оригинал берётся из `/opt/bin/keenkit.before-athena`.
-- После «99. Обновить скрипт» в KeenKit патч нужно применить заново (`keenkit --check` покажет, применён ли он).
+- После «99. Обновить скрипт» `keenkit` применяет патч заново при следующем запуске (`ATHENA="on"`). Если структура новой версии KeenKit не совпала, KeenKit запускается без п.9 с предупреждением.
 
 ⚠️ Загрузчик — опасная процедура: только файл своей модели, стабильное питание, UART на случай отказа. «Не обновляйте загрузчик, если всё работает» (wiki Athena).
 
@@ -127,10 +143,10 @@ athena-patch revert    # вернуть оригинал
 shellcheck keenkit install.sh athena-patch.sh && shellcheck -s sh tests/run.sh tests/athena.sh
 TEST_SH="busybox sh" sh tests/run.sh   # лаунчер и установщик, как на роутере
 TEST_SH=dash sh tests/run.sh
-KEENKIT_SRC=/путь/keenkit.sh busybox sh tests/athena.sh
+KEENKIT_SRC=/путь/keenkit.sh busybox sh tests/athena.sh   # athena-patch и возврат п.9 через лаунчер
 # миграция с патча v1 проверяется, если указать путь к нему: V1_PATCH=/путь/patch-athena.sh
 ```
 
 `tests/athena.sh` работает на настоящем KeenKit (в CI скачивается по закреплённому коммиту с проверкой SHA-256): установка, откат, миграция с v1, а также функциональные прогоны пропатченного `ota_update` с заглушками сети — п.9 (выбор версии, защита модели, mipsel), п.5 и п.8 в сравнении с оригиналом.
 
-Тесты работают в изолированном корне (`KVN_ROOT`) с поддельными `curl`, `/sys/class/net` и KeenKit. CI — `.github/workflows/ci.yml`.
+Тесты работают в изолированном корне (`KEENKIT_VPN_ROOT`, `ATHENA_ROOT`) с поддельными `curl`, `/sys/class/net` и KeenKit. CI — `.github/workflows/ci.yml`.
